@@ -1,0 +1,462 @@
+;=============================================================================
+; Module        : FPEVAL.S03
+; Version       : V0.1  07-jun-2010
+; Author        : Michel Bernard - mailto:michel.bernard@advalvas.be
+; Object        : Mathematic Formula Evaluation
+; Requires	: FPLIB - Single Precision Floating Point Math Library
+;		  INOUT - Serial I/O Comms Library
+; Target        : 8051 family
+; Assembler	: Micro Series 8051 Assembler 2.02/DOS - IAR 1990
+; Copyright (c) 2010 GmE Belgium - All Rights Reserved
+;		: Redistribution and use in source and binary forms, with or 
+;		: without modification, are permitted provided that the 
+;		: following conditions are met:
+;		: 1. Redistributions of source code must retain the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer.
+;		: 2. Redistributions in binary form must reproduce the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer in the documentation and/or other materials 
+;		: provided with the distribution.
+;		: 3. The name of the author may not be used to endorse or 
+;		: promote products derived from this software without specific 
+;		: prior written permission.
+; Disclaimer	: This software is in its early alpha stage.  It's not meant 
+;		: to be used for production code, and the API might change in 
+;		: the future.  Despite this, it might be useful in some 
+;		: situations and you are encouraged to try it by yourself. 
+;		: Suggestions, bug-reports and even better patches are welcome.
+;		: THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS 
+;		: OR IMPLIED WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR 
+;		: GmE MAKES ANY REPRESENTATION OR WARRANTY OF ANY KIND 
+;		: CONCERNING THE MERCHANTABILITY OF THIS SOFTWARE OR ITS 
+;		: FITNESS FOR ANY PARTICULAR PURPOSE.
+;=============================================================================
+;
+$fplib.inc
+$inout.inc
+
+	lstxrf
+	locsym+
+
+;=============================================================================	
+;
+;=============================================================================	
+
+	rseg	data
+
+RX:	ds	4
+RY:	ds	4
+pch:	ds	1
+pcl:	ds	1
+savsp:	ds	1
+
+
+;=============================================================================	
+;
+;=============================================================================	
+	rseg	code
+
+	public	fpeval
+
+;-----	Evaluate expression @dptr
+;in:	@dptr	expression to evaluate
+;out	@r0	fp result (packed)
+fpeval:	
+	mov	savsp,sp
+	call	fpexpr
+	mov	r0,#RX
+	ret
+
+;-----	evaluate expression
+fpexpr:
+
+
+;-----	evaluate sum/difference
+fpsum:	
+	call	fpprod
+fpsum0:
+	call	skipblk
+	xrl	a,#'+'
+	jz	fpsum1
+	xrl	a,#'+' xor '-'
+	jz	fpsum1
+	ret
+
+fpsum1:	
+	call	fpsum2
+	sjmp	fpsum0
+
+fpsum2:
+	movx	a,@dptr
+	push	acc
+	inc	dptr
+	call	pushRX
+	call	fpprod
+	call	popRY
+	pop	acc
+	call	pushfpret
+	mov	r0,#RY
+	mov	r1,#RX
+	cjne	a,#'+',fpsum3
+	jmp	addfp
+
+fpsum3:
+	jmp	subfp
+
+
+;-----	evaluate product/quotient
+fpprod:	
+	call	fppow
+fpprod0:
+	call	skipblk
+	xrl	a,#'*'
+	jz	fpprod1
+	xrl	a,#'*' xor '/'
+	jz	fpprod1
+	ret
+
+fpprod1:
+	call	fpprod2
+	sjmp	fpprod0
+
+fpprod2:
+	movx	a,@dptr
+	push	acc
+	inc	dptr
+	call	pushRX
+	call	fppow
+	call	popRY
+	pop	acc
+	call	pushfpret
+	mov	r0,#RY
+	mov	r1,#RX
+	cjne	a,#'*',fpprod3
+	jmp	mulfp
+
+fpprod3:
+	jmp	divfp
+	
+
+;-----	evaluate power
+fppow:
+	call	fpfunc
+fppow0:
+	call	skipblk
+	xrl	a,#'^'
+	jz	fppow1
+	ret
+
+fppow1:
+	call	fppow2
+	sjmp	fppow0
+
+fppow2:
+	movx	a,@dptr
+	inc	dptr
+	call	pushRX
+	call	fppow
+	call	popRY
+	call	pushfpret
+	mov	r0,#RY
+	mov	r1,#RX
+	jmp	powfp
+	
+
+;-----	evaluate function
+fpfunc:	call	skipblk
+	xrl	a,#'A'
+	clr	c
+	subb	a,#26
+	jnc	fpvalue
+	
+	mov	r2,dph
+	mov	r0,dpl
+	mov	r3,dph
+	mov	r1,dpl
+	mov	dptr,#tfuncs
+	
+fpfunc_loop:
+	clr	a
+	movc	a,@a+dptr
+	jz	fpfunc_notfound		;end of keyword table
+
+fpfunc_loop1:
+	clr	a
+	movc	a,@a+dptr
+	inc	dptr
+	jz	fpfunc_found		;end of keyword
+	
+	mov	b,a
+	mov	p2,r2
+	movx	a,@r0
+	inc	r0
+	xch	a,r0
+	jnz	fpfunc0
+
+	inc	r2
+
+fpfunc0:
+	xch	a,r0
+	xrl	a,b
+	jz	fpfunc_loop1		;loop while chars match
+	
+fpfunc1:
+	clr	a
+	movc	a,@a+dptr
+	inc	dptr
+	jnz	fpfunc1
+	
+	inc	dptr
+	inc	dptr
+	
+	mov	a,r3
+	mov	r2,a
+	mov	a,r1
+	mov	r0,a
+	
+	sjmp	fpfunc_loop
+
+fpfunc_found:
+	clr	a
+	movc	a,@a+dptr
+	mov	b,a
+	inc	dptr
+	clr	a
+	movc	a,@a+dptr
+	push	acc
+	push	b
+	
+	mov	dph,r2
+	mov	dpl,r0
+	
+	ret
+
+fpfunc_notfound:
+	mov	dph,r3
+	mov	dpl,r1
+	
+
+;-----	evaluate value
+fpvalue:
+	call	skipblk
+	xrl	a,#'('
+	jz	fpvalue0
+	xrl	a,#'(' XOR '.'
+	jz	fpvalue1
+	xrl	a,#'.' XOR '-'
+	jz	fpvalue1
+	xrl	a,#'-' XOR '0'
+	clr	c
+	subb	a,#10
+	jc	fpvalue1
+	ret
+
+fpvalue0:
+	inc	dptr
+	call	fpexpr
+	mov	a,#')'
+	jmp	chkchr
+
+fpvalue1:
+	mov	r0,#RX
+	jmp	readfp
+	
+
+;-----	push fpret address on stack
+pushfpret:
+	mov	r7,a
+	pop	pch
+	pop	pcl
+	mov	a,#low fpret
+	push	acc
+	mov	a,#high fpret
+	push	acc
+	push	pcl
+	push	pch
+	mov	a,r7
+	ret
+
+
+;-----	end operation
+fpret:
+	mov	r7,#4
+fpret1:
+	mov	a,@r0
+	mov	@r1,a
+	inc	r0
+	inc	r1
+	djnz	r7,fpret1
+	mov	r0,#RX
+	ret
+
+
+;-----	functions
+tfuncs:
+	db	'SQRT',0
+	dw	fpsqrt
+	db	'SQR',0
+	dw	fpsqr
+	db	'LOG',0
+	dw	fplog
+	db	'LN',0
+	dw	fpln
+	db	'EXP',0
+	dw	fpexp
+	db	'SIN',0
+	dw	fpsin
+	db	'COS',0
+	dw	fpcos
+	db	'TAN',0
+	dw	fptan
+	db	'ASIN',0
+	dw	fpasin
+	db	'ACOS',0
+	dw	fpacos
+	db	'ATAN',0
+	dw	fpatan
+	db	'INT',0
+	dw	fpint
+	db	'FRAC',0
+	dw	fpfrac
+	db	'PI',0
+	dw	fppi
+	db	0
+
+fpsqrt:
+	call	fpfunc
+	jmp	sqrtfp
+
+fpsqr:
+	call	fpfunc
+	jmp	pow2fp
+
+fplog:
+	call	fpfunc
+	jmp	logfp
+
+fpln:
+	call	fpfunc
+	jmp	lnfp
+
+fpexp:
+	call	fpfunc
+	jmp	expfp
+
+fpsin:
+	call	fpfunc
+	jmp	sinfp
+
+fpcos:
+	call	fpfunc
+	jmp	cosfp
+
+fptan:
+	call	fpfunc
+	jmp	tanfp
+
+fpasin:
+	call	fpfunc
+	jmp	asinfp
+
+fpacos:
+	call	fpfunc
+	jmp	acosfp
+
+fpatan:
+	call	fpfunc
+	jmp	atanfp
+
+fpint:
+	call	fpfunc
+	jmp	intfp
+
+fpfrac:
+	call	fpfunc
+	jmp	fracfp
+
+fppi:
+	mov	r0,#RX
+	jmp	pifp
+
+
+;=============================================================================	
+;
+;=============================================================================	
+
+;-----	
+chkchr:
+	mov	r7,a
+	call	skipblk
+	xrl	a,r7
+	jnz	chkchr1
+	
+	inc	dptr
+	ret
+
+chkchr1:
+	call	outcsp
+	db	'Expected: ',0
+	mov	a,r7
+	call	outacc
+	call	outcrlf
+	mov	sp,savsp
+	ret
+	
+;-----	
+skipblk0:
+	inc	dptr
+skipblk:
+	movx	a,@dptr
+	xrl	a,#' '
+	jz	skipblk0
+	xrl	a,#' ' XOR 09h
+	jz	skipblk0
+	xrl	a,#09h
+	ret
+
+;-----	
+pushRX:	pop	pch
+	pop	pcl
+	push	RX
+	push	RX+1
+	push	RX+2
+	push	RX+3
+	push	pcl
+	push	pch
+	ret
+
+;-----	
+pushRY:	pop	pch
+	pop	pcl
+	push	RY
+	push	RY+1
+	push	RY+2
+	push	RY+3
+	push	pcl
+	push	pch
+	ret
+
+;-----	
+popRX:	pop	pch
+	pop	pcl
+	pop	RX+3
+	pop	RX+2
+	pop	RX+1
+	pop	RX
+	push	pcl
+	push	pch
+	ret
+
+;-----	
+popRY:	pop	pch
+	pop	pcl
+	pop	RY+3
+	pop	RY+2
+	pop	RY+1
+	pop	RY
+	push	pcl
+	push	pch
+	ret
+
+	end

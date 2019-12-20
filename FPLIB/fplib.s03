@@ -1,0 +1,4144 @@
+;=============================================================================
+; Module        : FPLIB.S03
+; Version       : V0.1  07-jun-2010
+; Author        : Michel Bernard - mailto:michel.bernard@advalvas.be
+; Object        : Single Precision Floating Point Math Library
+; Requires	: INOUT - Serial I/O Comms Library
+; Target        : 8051 family
+; Assembler	: Micro Series 8051 Assembler 2.02/DOS - IAR 1990
+; Copyright (c) 2010 GmE Belgium - All Rights Reserved
+;		: Redistribution and use in source and binary forms, with or 
+;		: without modification, are permitted provided that the 
+;		: following conditions are met:
+;		: 1. Redistributions of source code must retain the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer.
+;		: 2. Redistributions in binary form must reproduce the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer in the documentation and/or other materials 
+;		: provided with the distribution.
+;		: 3. The name of the author may not be used to endorse or 
+;		: promote products derived from this software without specific 
+;		: prior written permission.
+; Disclaimer	: This software is in its early alpha stage.  It's not meant 
+;		: to be used for production code, and the API might change in 
+;		: the future.  Despite this, it might be useful in some 
+;		: situations and you are encouraged to try it by yourself. 
+;		: Suggestions, bug-reports and even better patches are welcome.
+;		: THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS 
+;		: OR IMPLIED WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR 
+;		: GmE MAKES ANY REPRESENTATION OR WARRANTY OF ANY KIND 
+;		: CONCERNING THE MERCHANTABILITY OF THIS SOFTWARE OR ITS 
+;		: FITNESS FOR ANY PARTICULAR PURPOSE.
+;=============================================================================
+
+$inout.inc
+$xmacro.inc
+$sfr552.inc
+
+	lstxrf
+	locsym+
+
+
+;=============================================================================
+;	fp storage format
+;=============================================================================
+
+; FP Storage = Modified IEEE 754 binary32 = single precision
+; 23+1 bit mantissa (using implicit msb 1) and 8 bit signed 2's exponent
+;
+; Deviations from IEEE 754 standard:
+; - subnormal values replaced by 23 bit unsigned integer values
+; (1st byte is null)
+; - null values are always +0
+;
+; Storage format for non-null normal values:
+;	seeeeeee emmmmmmm mmmmmmmm mmmmmmmm = (-1)^s * 2^(e - 127) * (1 + m*2^(-23))
+; Infinite values:
+;	s1111111 10000000 00000000 00000000 = (-1)^s * #INF
+; Null values:
+;	00000000 00000000 00000000 00000000 = 0
+; Not A Number values:
+;	11111111 1xxxxxxx xxxxxxxx xxxxxxxx = #NAN (with x <> 0)
+; Unsigned Integer values (deviation from IEEE 754 binary32)
+;	00000000 0mmmmmmm mmmmmmmm mmmmmmmm = m
+
+
+
+
+	rseg	data
+
+_X	ds	4			;stack element X
+_Y	ds	4			;stack element Y
+_Z	ds	4			;stack element Z
+_T	ds	4			;stack element T
+_END	equ	$			;end of stack
+_A	ds	4			;working register 1
+_B	ds	4			;working register 2
+_C	ds	4			;working register 3
+_D	ds	4			;working register 4
+_LASTX	ds	4			;LASTX
+
+ptest:	ds	1			;test register pointer
+strfmt:	ds	1			;display format
+					;  bit 	4: scientific
+					;	5: trailing zeros
+csegmem:				;code memory segment used ('C','D' or 'X')
+	ds	1
+strbuforg:				;string buffer origin H-L (xdata)
+	ds	2			;
+strbufptr:				;string buffer pointer H-L (xdata)
+	ds	2			;
+stobuforg:
+	ds	2			;storage buffer origin H-L
+stobufsiz:
+	ds	1			;storage buffer size
+	
+
+	rseg	bit
+	
+_Xsign	ds	1
+_Xov	ds	1
+_Asign	ds	1
+_Aov	ds	1
+_Bsign	ds	1
+_Bov	ds	1
+scibit	ds	1
+fixbit	ds	1
+
+	rseg	xdata
+
+strbuf:	ds	256			;string buffer
+
+
+	rseg	code
+
+;-----	Version and copyright stuff
+	public	fp_version
+fp_version:
+	db	'FPLIB V0.1 alpha - 07-jun-2010',0
+
+	public	fp_copyright
+fp_copyright:
+	db	'Copyright (c) 2010 GmE Belgium - All Rights Reserved',0
+	
+	
+;-----	init storage buffer (xdata)
+;in:	dptr	storage buffer origin
+;	a	storage buffer size (# of entries)
+	public	fp_setstobuf
+fp_setstobuf:
+	mov	stobufsiz,a
+	mov	stobuforg,dph
+	mov	stobuforg+1,dpl
+	ret
+
+;-----	init string buffer (xdata)
+;in:	dptr	string buffer origin
+	public	fp_setstrbuf
+fp_setstrbuf:
+	mov	strbuforg,dph
+	mov	strbuforg+1,dpl
+	mov	strbufptr,dph
+	mov	strbufptr+1,dpl
+	ret
+	
+
+
+;-----	run fp code at current pc location
+;in:	pc	fp code origin (code)
+	public	fp_run_pc
+fp_run_pc:
+	pop	dph
+	pop	dpl
+	call	fp_run_cdptr
+	push	dpl
+	push	dph
+	ret
+
+;-----	run fp code at dptr (xdata memory)
+;in:	dptr	fp code origin (xdata)
+	public	fp_run_xdptr
+fp_run_xdptr:
+	mov	csegmem,#'X'
+	sjmp	fp_run_dptr
+
+;-----	run fp code at dptr (code memory)
+;in:	dptr	fp code origin (code)
+	public	fp_run_cdptr
+fp_run_cdptr:
+	mov	csegmem,#'C'
+
+fp_run_dptr:
+	call	fp_run_dptr0
+	sjmp	fp_run_dptr
+
+fp_run_dptr0:
+	call	fetch_a
+	mov	r0,dpl
+	mov	r2,dph
+	mov	dptr,#fp_vec
+	mov	b,#2
+	mul	ab
+	add	a,dpl
+	xch	a,b
+	addc	a,dph
+	mov	dph,a
+	mov	dpl,b
+	clr	a
+	movc	a,@a+dptr
+	push	acc
+	inc	dptr
+	clr	a
+	movc	a,@a+dptr
+	push	acc
+	mov	dpl,r0
+	mov	dph,r2
+	ret
+
+;-----	'dw' with specified byte order
+	macro	%dvec
+	db	low \0
+	db	high \0
+	endmac
+
+;-----	fp routines vectors table	
+fp_vec:	%dvec	fp_nop			;00:	nop
+	%dvec	fp_ret			;01:	ret
+	%dvec	fp_call			;02:	call
+	%dvec	fp_push			;03:	push
+	%dvec	fp_stox			;04:	stox
+	%dvec	fp_rclx			;05:	rclx
+	%dvec	fp_swap			;06:	swap
+	%dvec	fp_rldn			;07:	rldn
+	%dvec	fp_add			;08:	add
+	%dvec	fp_sub			;09:	sub
+	%dvec	fp_mul			;0A:	mul
+	%dvec	fp_div			;0B:	div
+	%dvec	fp_pow			;0C:	pow
+	%dvec	fp_chs			;0D:	chs
+	%dvec	fp_inv			;0E:	inv
+	%dvec	fp_lastx		;0F:	lastx
+	%dvec	fp_input		;10:	input
+	%dvec	fp_write		;11:	write
+	%dvec	fp_prompt		;12:	prompt
+	%dvec	fp_readx		;13:	readx
+	%dvec	fp_writex		;14:	writex
+	%dvec	fp_ln			;15:	ln
+	%dvec	fp_exp			;16:	exp
+	%dvec	fp_sin			;17:	sin
+	%dvec	fp_cos			;18:	cos
+	%dvec	fp_tan			;19:	tan
+	%dvec	fp_asin			;1A:	asin
+	%dvec	fp_acos			;1B:	acos
+	%dvec	fp_atan			;1C:	atan
+	%dvec	fp_log			;1D:	log
+	%dvec	fp_pow2			;1E:	pow2
+	%dvec	fp_sqrt			;1F:	sqrt
+	%dvec	fp_enter		;20:	enter
+	%dvec	fp_aclear		;21:	aclear
+	%dvec	fp_clear		;22:	clear
+	%dvec	fp_print		;23:	print
+	%dvec	fp_int			;24:	int
+	%dvec	fp_frac			;25:	frac
+	%dvec	fp_sto			;26:	sto
+	%dvec	fp_rcl			;27:	rcl
+	%dvec	fp_cint			;28:	cint
+	%dvec	fp_pi			;29:	pi
+	%dvec	fp_e			;2A:	e
+	%dvec	fp_stow			;2B:	stow
+	%dvec	fp_rclw			;2C:	rclw
+	%dvec	fp_cmp			;2D:	cmp
+	%dvec	fp_jmp			;2E:	jmp
+	%dvec	fp_jc			;2F:	jc
+	%dvec	fp_jnc			;30:	jnc
+	%dvec	fp_jz			;31:	jz
+	%dvec	fp_jnz			;32:	jnz
+	%dvec	fp_je			;33:	je
+	%dvec	fp_jne			;34:	jne
+	%dvec	fp_djnz			;35:	djnz
+	%dvec	fp_test			;36:	test
+	%dvec	fp_fmt			;37:	fmt
+
+
+
+;=============================================================================
+;	fp code executive routines
+;=============================================================================
+
+	macro	%notimp
+
+	call	outcsp
+	db	'\0',0
+	jmp	outnotimp
+
+	endmac
+
+
+;-----	NOP	no operation
+fp_nop:	
+	ret
+
+
+;-----	RET	return to caller
+fp_ret:	
+	dec	sp
+	dec	sp
+	ret
+
+
+;-----	CALL	call procedure at given address
+fp_call:
+	call	fetch_ba
+	push	dpl
+	push	dph
+	mov	dpl,b
+	mov	dph,a
+	call	fp_run_dptr
+	pop	dph
+	pop	dpl
+	ret
+
+
+;-----	PUSH	push X on stack	(roll stack up, keeping X)
+fp_push:
+	jmp	pushx
+
+
+;-----	STOX	store X to xdata memory at given address	
+fp_stox:
+	call	fetch_ba
+
+	push	dpl
+	push	dph
+
+	mov	dph,b
+	mov	dpl,a
+
+	mov	r0,#_X
+
+	call	move_r0_xdptr
+
+	pop	dph
+	pop	dpl
+	
+	ret
+	
+
+;-----	RCLX	recall from xdata memory at given address to X (roll stack up)
+fp_rclx:
+	call	pushx
+	call	fetch_ba
+
+	push	dpl
+	push	dph
+
+	mov	dph,b
+	mov	dpl,a
+
+	mov	r0,#_X
+
+	call	move_xdptr_r0
+	
+	pop	dph
+	pop	dpl
+	
+	ret
+
+
+;-----	SWAP	swap X and Y values
+fp_swap:
+	mov	r0,#_X
+	mov	r1,#_Y
+	
+	jmp	swapx
+
+
+
+;-----	RLDN	roll stack down (T -> Z -> Y -> X -> T)	
+fp_rldn:
+	mov	r0,#_X+4
+	mov	r1,#_X
+	mov	b,#3*4
+fp_rldn0:	
+	xch	a,@r0
+	xch	a,@r1
+	xch	a,@r0
+	inc	r0
+	inc	r1
+	djnz	b,fp_rldn0
+	ret
+
+
+;-----	ADD	X <- Y + X; Y <- Z; Z <- T
+fp_add:
+	call	mlastx
+	mov	r0,#_Y
+	mov	r1,#_X
+	call	addfp
+	jmp	popx
+
+
+;-----	SUB	X <- Y - X; Y <- Z; Z <- T
+fp_sub:
+	call	mlastx
+	mov	r0,#_Y
+	mov	r1,#_X
+	call	subfp
+	jmp	popx
+
+
+;-----	MUL	X <- Y * X; Y <- Z; Z <- T
+fp_mul:
+	call	mlastx
+	mov	r0,#_Y
+	mov	r1,#_X
+	call	mulfp
+	jmp	popx
+
+
+;-----	DIV	X <- Y / X; Y <- Z; Z <- T
+fp_div:
+	call	mlastx
+	mov	r0,#_Y
+	mov	r1,#_X
+	call	divfp
+	jmp	popx
+
+
+;-----	POW	X <- Y ^ X; Y <- Z; Z <- T
+fp_pow:
+	call	mlastx
+	mov	r0,#_Y
+	mov	r1,#_X
+	call	powfp
+	jmp	popx
+
+
+;-----	CHS	X <- -X
+fp_chs:
+	call	mlastx
+	mov	r0,#_X
+	jmp	chsfp
+
+
+;-----	INV	X <- 1 / X
+fp_inv:
+	call	mlastx
+	mov	r0,#_X
+	jmp	invfp
+	
+
+;-----	LASTX	T <- Z; Z <- Y; Y <- X; X <- LASTX
+fp_lastx:
+	call	pushx
+	mov	r0,#_LASTX
+	mov	r1,#_X
+	mov	b,#4
+	jmp	movex
+
+
+;-----	INPUT	T <- Z; Z <- Y; Y <- X; X <- user input
+fp_input:
+	call	instrbuf
+	jmp	fp_readx
+
+
+;-----	WRITE	write text to string buffer until null char
+fp_write:
+	call	fetch_a
+	jz	fp_write_ret
+	call	wr_acc
+	sjmp	fp_write
+fp_write_ret:
+	ret
+
+
+;-----	PROMPT	write string to terminal and wait user input
+fp_prompt:
+	call	outstrbuf
+	call	instrbuf
+	ret
+
+
+;-----	READX	T <- Z; Z <- Y; Y <- X; X <- value in string buffer
+fp_readx:
+	call	pushx
+
+	push	dpl
+	push	dph
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+
+	mov	r0,#_X
+	call	readfp
+
+	mov	strbufptr,dph
+	mov	strbufptr+1,dpl
+	pop	dph
+	pop	dpl
+
+	ret
+	
+
+;-----	WRITEX	print X to string buffer
+fp_writex:
+	mov	r0,#_X
+	call	writefp
+	ret
+
+
+;-----	LN	X <- ln(X)
+fp_ln:
+	call	mlastx
+	mov	r0,#_X
+	jmp	lnfp
+
+
+;-----	EXP	X <- exp(X)
+fp_exp:
+	call	mlastx
+	mov	r0,#_X
+	jmp	expfp
+
+
+;-----	SIN	X <- sin(X)
+fp_sin:
+	call	mlastx
+	mov	r0,#_X
+	jmp	sinfp
+
+
+;-----	COS	X <- cos(X)
+fp_cos:
+	call	mlastx
+	mov	r0,#_X
+	jmp	cosfp
+
+
+;-----	TAN	X <- tan(X)
+fp_tan:
+	call	mlastx
+	mov	r0,#_X
+	jmp	tanfp
+
+
+;-----	ASIN	X <- asin(X)
+fp_asin:
+	call	mlastx
+	mov	r0,#_X
+	jmp	asinfp
+
+
+;-----	ACOS	X <- acos(X)
+fp_acos:
+	call	mlastx
+	mov	r0,#_X
+	jmp	acosfp
+
+
+;-----	ATAN	X <- atan(X)
+fp_atan:
+	call	mlastx
+	mov	r0,#_X
+	jmp	atanfp
+
+
+;-----	LOG	X <- log(X)
+fp_log:
+	call	mlastx
+	mov	r0,#_X
+	jmp	logfp
+
+
+;-----	POW2	X <- X * X
+fp_pow2:
+	call	mlastx
+	mov	r0,#_X
+	jmp	pow2fp
+
+
+;-----	SQRT	X <- sqrt(x)
+fp_sqrt:
+	call	mlastx
+	mov	r0,#_X
+	jmp	sqrtfp
+	
+	
+;-----	ENTER	T <- Z; Z <- Y; Y <- X; X <- immediate value
+fp_enter:
+	call	pushx
+	mov	b,#4
+	mov	r1,#_X
+fp_enter0:
+	call	fetch_a
+	mov	@r1,a
+	inc	r1
+	djnz	b,fp_enter0
+
+	ret
+
+
+;-----	ACLEAR	clear string buffer
+fp_aclear:
+	jmp	clrstrbuf
+
+	
+;-----	CLEAR	X <- 0; Y <- 0; Z <- 0; T <- 0
+fp_clear:
+	mov	r7,#4
+	mov	r0,#_X
+fp_clear0:
+	call	zerox
+	mov	a,r0
+	add	a,#4
+	mov	r0,a
+	djnz	r7,fp_clear0
+	
+	ret
+
+
+;-----	PRINT	print string to terminal
+fp_print:
+	call	outstrbuf
+	jmp	clrstrbuf
+
+
+;-----	INT	integer portion
+fp_int:
+	call	mlastx
+	mov	r0,#_X
+	jmp	intfp
+
+
+;-----	FRAC	fractional portion
+fp_frac:
+	call	mlastx
+	mov	r0,#_X
+	jmp	fracfp
+
+
+;-----	STO	store X to storage area
+fp_sto:
+	call	fetch_a
+	push	dpl
+	push	dph
+
+	call	stoadd4
+	
+	mov	r0,#_X
+	
+	call	move_r0_xdptr
+
+	pop	dph
+	pop	dpl
+
+	ret
+	
+
+;-----	RCL	recall from storage area to X (roll stack up)
+fp_rcl:
+	call	pushx
+	call	fetch_a
+	push	dpl
+	push	dph
+
+	call	stoadd4
+	
+	mov	r0,#_X
+
+	call	move_xdptr_r0
+	
+	pop	dph
+	pop	dpl
+	ret
+
+
+;-----	CINT	convert X to unsigned integer
+fp_cint:
+	call	mlastx
+	mov	r0,#_X
+	call	unpackfp_r0
+	
+	jb	ov,fp_cint_ret
+	
+	call	cintx
+	
+fp_cint_ret:
+	ret
+
+
+;-----	PI	load PI
+fp_pi:
+	call	pushx
+	mov	r0,#_X
+	jmp	pifp
+
+
+;-----	E	load e = exp(1)
+fp_e:
+	call	pushx
+	jmp	efp
+	
+
+;-----	STOW	store X as 16 bit unsigned int to storage area
+;		(using half registers)
+fp_stow:
+	call	fetch_a
+	push	dpl
+	push	dph
+
+	call	stoadd2
+
+	mov	r1,#_X
+	mov	r0,#_A
+	call	move_r1_r0
+	call	unpackfp
+	jnb	ov,fp_stow1
+
+fp_stow0:	
+	mov	a,#0FFh			;overflow => store FFFF
+	movx	@dptr,a
+	inc	dptr
+	movx	@dptr,a
+	sjmp	fp_stow9
+
+fp_stow1:
+	call	cintx
+	mov	a,@r0
+	jnz	fp_stow0		;exponent not null => overflow
+	
+	inc	r0
+	mov	a,@r0
+	jnz	fp_stow0		;value > FFFF => overflow
+	
+	inc	r0
+	mov	b,#2
+
+	call	move_b_r0_xdptr
+
+fp_stow9:
+	pop	dph
+	pop	dpl
+	ret
+	
+
+;-----	RCL	recall 16 bit unsigned int from storage area to X (roll stack up)
+;		(using half registers)
+fp_rclw:
+	call	pushx
+	call	fetch_a
+	push	dpl
+	push	dph
+
+	call	stoadd2
+	
+	mov	r0,#_X
+	clr	a
+	mov	@r0,a
+	inc	r0
+	mov	@r0,a
+	inc	r0
+	mov	b,#2
+
+	call	move_b_xdptr_r0
+
+	pop	dph
+	pop	dpl
+	ret
+
+
+;-----	CMP	compare
+fp_cmp:
+	mov	r0,#_A
+	mov	r1,#_Y
+	call	move_r1_r0		;A <- Y
+	mov	r1,#_X
+	call	subfp			;A <- A - X
+	call	move_r0_r1		;X <- A
+	mov	ptest,#_T
+	jmp	fp_rldn			;T <- X <- Y <- Z <- T
+	
+
+;-----	JMP	jump
+fp_jmp:
+	call	fetch_ba
+	mov	dph,b
+	mov	dpl,a
+	ret
+
+
+;-----	JC	jump if carry
+fp_jc:
+	call	fptest
+	jc	fp_jmp
+	jmp	fetch_ba
+
+
+;-----	JNC	jump if no carry
+fp_jnc:
+	call	fptest
+	jnc	fp_jmp
+	jmp	fetch_ba
+
+
+;-----	JZ	jump if zero
+fp_jz:
+	call	fptest
+	jz	fp_jmp
+	jmp	fetch_ba
+
+
+;-----	JNZ	jump if not zero
+fp_jnz:
+	call	fptest
+	jnz	fp_jmp
+	jmp	fetch_ba
+
+
+;-----	JE	jump if error
+fp_je:
+	call	fptest
+	jb	ov,fp_jmp
+	jmp	fetch_ba
+
+
+;-----	JNE	jump if no error
+fp_jne:
+	call	fptest
+	jnb	ov,fp_jmp
+	jmp	fetch_ba
+
+
+;-----	DJNZ	decrement register and jump if not zero
+fp_djnz:
+	call	fetch_a
+
+	push	dpl
+	push	dph
+
+	call	stoadd4
+	
+	push	dpl
+	push	dph
+	
+	mov	r0,#_A
+
+	call	move_xdptr_r0
+	
+	mov	r0,#_A
+	call	unpackfp
+	call	cintx
+	
+	mov	b,#0
+	mov	r0,#_A+3
+	setb	c
+	mov	r3,#3
+
+fp_djnz1:
+	mov	a,@r0
+	subb	a,#0
+	mov	@r0,a
+	orl	a,b
+	mov	b,a
+	dec	r0
+	djnz	r3,fp_djnz1
+	
+	pop	dph
+	pop	dpl
+	
+	mov	a,b
+	jz	fp_djnz5
+	
+	mov	r0,#_A
+	
+	call	move_r0_xdptr
+	
+	pop	dph
+	pop	dpl
+
+	call	fetch_ba
+	
+	mov	dph,b
+	mov	dpl,a
+
+	ret
+
+
+fp_djnz5:
+	pop	dph
+	pop	dpl
+
+	call	fetch_ba
+	
+	ret
+
+
+
+;-----	TEST	test register X
+fp_test:
+	mov	ptest,#_X
+	ret
+
+
+;-----	FMT	set output format
+fp_fmt:
+	call	fetch_a
+	mov	strfmt,a
+	ret
+
+
+;-----	fetch next 2 bytes in B:A
+fetch_ba:	
+	call	fetch_a
+	mov	b,a
+
+
+;-----	fetch next byte in A
+fetch_a:
+	mov	a,csegmem
+	cjne	a,#'X',fetch_a_notx
+	movx	a,@dptr
+	sjmp	fetch_a_ret	
+fetch_a_notx:
+	clr	a
+	movc	a,@a+dptr
+fetch_a_ret:
+	inc	dptr
+	ret	
+
+
+;-----	get storage location in DPTR with offset in ACC
+;4-byte location
+stoadd4:
+	add	a,acc
+
+;2-byte location
+stoadd2:
+	add	a,acc
+
+;1-byte location
+stoadd:
+	mov	dph,stobuforg
+	mov	dpl,stobuforg+1
+
+	add	a,dpl
+	mov	dpl,a
+	clr	a
+	addc	a,dph
+	mov	dph,a
+
+	ret	
+
+
+;-----	NOT IMPLEMENTED
+outnotimp:	
+	call	outcsp
+	db	' - not implemented ',13,10,0
+	ret
+	
+
+
+;=============================================================================
+;	String buffer routines
+;=============================================================================
+
+
+;-----	write character to buffer
+;in:	a	char to write (saved)
+	public	wr_acc
+wr_acc:	
+	push	acc
+	push	dpl
+	push	dph
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+	movx	@dptr,a
+	inc	dptr
+	clr	a
+	movx	@dptr,a
+	mov	strbufptr,dph
+	mov	strbufptr+1,dpl
+	pop	dph
+	pop	dpl
+	pop	acc
+	ret
+	
+
+;-----	write code string to buffer
+;in:	dptr	location of string to write (code area)
+	public	wr_cdptr
+wr_cdptr:	
+	clr	a
+	movc	a,@a+dptr
+	inc	dptr
+	jz	wr_cdptr_ret
+	
+	call	wr_acc
+
+	sjmp	wr_cdptr
+wr_cdptr_ret:
+	ret
+	
+
+;-----	send string buffer to console
+	public	outstrbuf
+outstrbuf:
+	push	dpl
+	push	dph
+
+	mov	dph,strbuforg
+	mov	dpl,strbuforg+1
+
+	call	outxdptr
+
+	pop	dph
+	pop	dpl
+
+	ret
+
+
+;-----	rewind string buffer
+	public	rwdstrbuf
+rwdstrbuf:
+	mov	strbufptr,strbuforg
+	mov	strbufptr+1,strbuforg+1
+	ret
+	
+
+;-----	clear string buffer
+	public	clrstrbuf
+clrstrbuf:
+	call	rwdstrbuf
+
+	push	dpl
+	push	dph
+
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+
+	clr	a
+	movx	@dptr,a
+
+	pop	dph
+	pop	dpl
+
+	ret
+
+
+;-----	read string from terminal to string buffer; rewind buffer
+	public	instrbuf
+instrbuf:
+	call	rwdstrbuf
+
+	push	dpl
+	push	dph
+
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+
+	mov	b,#254
+	call	inxdptre
+
+	pop	dph
+	pop	dpl
+
+	ret
+
+
+;-----	read char from string buffer (strbufptr incremented if char not null)
+;out:	a	char read
+	public	rd_acc
+rd_acc:	push	dpl
+	push	dph
+
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+
+	movx	a,@dptr
+	jz	rd_ac1
+
+	inc	dptr
+
+rd_ac1:	mov	strbufptr,dph
+	mov	strbufptr+1,dpl
+
+	pop	dph
+	pop	dpl
+
+	ret
+	
+
+
+;=============================================================================
+;	FP routines (packed values)
+;=============================================================================
+
+
+;-----	write fp value @r0 to string buffer
+;in:	@r0	arg packed
+;using:	_A	used by conversion
+;	_B	used by conversion
+	public	writefp
+writefp:	
+	mov	a,r0
+	push	acc
+	mov	a,r1
+	push	acc
+	mov	r1,#_A
+	call	move_r0_r1
+	mov	r0,#_A
+	mov	r1,#_B
+	call	unpackfp
+	jnb	ov,writefp2		;jump if normal value
+	
+	jnz	writefp1		;jump if #NAN
+	
+	mov	a,#'+'
+	jnc	writefp0		;jump if +#INF
+	
+	mov	a,#'-'			;-#INF
+
+writefp0:
+	call	wr_acc
+	push	dpl
+	push	dph
+	mov	dptr,#INF_str
+	call	wr_cdptr
+	
+writefp01:
+	pop	dph
+	pop	dpl
+	sjmp	writefpx
+	
+writefp1:
+	push	dpl
+	push	dph
+	mov	a,#' '
+	call	wr_acc
+	mov	dptr,#NAN_str
+	call	wr_cdptr
+	sjmp	writefp01
+	
+writefp2:
+	call	eeconv
+	call	eeprint
+	
+writefpx:
+	pop	acc
+	mov	r1,a
+	pop	acc
+	mov	r0,a
+	ret
+
+INF_str:
+	db	'#INF',0
+
+NAN_str:
+	db	'#NAN',0
+	
+
+;-----	read fp value @r0 from string buffer
+;using:	r0-r3	used by mul_32_8
+	public	readfp
+readfp:	call	zerox
+	mov	r1,#_A
+
+	
+	clr	a
+	mov	r4,a			;10's exponent
+	clr	f0			;decimal point found
+	clr	_Xsign			;sign
+	
+	movx	a,@dptr
+	cjne	a,#'-',readfp_loop
+	
+	inc	dptr
+	setb	_Xsign
+
+readfp_loop:
+	movx	a,@dptr
+	clr	c
+	subb	a,#'0'+10
+	jnc	readfp_nodigit
+	
+	add	a,#10
+	jnc	readfp_nodigit
+	
+	mov	r7,a
+	inc	dptr
+	
+	mov	a,@r0
+	jnz	readfp_skipdigit
+
+	mov	r2,#10
+	call	mul_32_8
+	call	move_r1_r0
+	
+	inc	r0
+	inc	r0
+	inc	r0
+	inc	r0
+	
+	mov	a,r7
+	mov	r7,#4
+	clr	c
+
+readfp_adddigit:
+	dec	r0
+	addc	a,@r0
+	mov	@r0,a
+	clr	a
+	djnz	r7,readfp_adddigit
+
+	jnb	f0,readfp_loop
+
+	dec	r4
+	sjmp	readfp_loop
+
+readfp_skipdigit:
+	jb	f0,readfp_loop
+
+	inc	r4
+	sjmp	readfp_loop
+
+readfp_nodigit:
+	movx	a,@dptr
+	cjne	a,#'.',readfp_nopoint
+
+	inc	dptr
+	setb	f0
+	sjmp	readfp_loop
+
+readfp_nopoint:
+	anl	a,#0DFh
+	cjne	a,#'E',readfp_noee
+
+	clr	f0
+	inc	dptr
+	movx	a,@dptr
+	cjne	a,#'-',readfp_eepos
+
+	setb	f0
+	inc	dptr
+
+readfp_eepos:
+	mov	r5,#0
+
+readfp_eeloop:
+	movx	a,@dptr
+	clr	c
+	subb	a,#'0'+10
+	jnc	readfp_eedone
+	
+	add	a,#10
+	jnc	readfp_eedone
+
+	inc	dptr
+	mov	r2,a
+	mov	a,r5
+	mov	b,#10
+	mul	ab
+	add	a,r2
+	mov	r5,a
+	mov	a,b
+	jz	readfp_eeloop
+	
+	mov	r5,#7Fh			;overflow
+	sjmp	readfp_eeloop
+
+readfp_eedone:
+	mov	a,r5
+	jnb	f0,readfp_eedone1
+	
+	cpl	a
+	inc	a
+
+readfp_eedone1:
+	add	a,r4
+	mov	r4,a
+
+readfp_noee:
+	call	csngx			;convert integer to floating point
+	mov	a,@r0
+	jz	readfp_end
+
+	mov	r5,a
+	clr	a
+	mov	@r0,a
+
+readfp_align_loop:
+	mov	a,r4
+	jz	readfp_aligndone
+	
+	jb	acc.7,readfp_aligndiv
+	
+	dec	r4
+	mov	r2,#10
+	call	mul_32_8
+	call	move_r1_r0
+	
+readfp_alignmul_loop:
+	mov	a,@r0
+	jz	readfp_align_loop
+	
+	inc	r5
+	mov	r7,#4
+	
+	call	shr_r0_0
+
+	sjmp	readfp_alignmul_loop
+
+readfp_aligndiv:
+	inc	r4
+
+readfp_aligndiv_loop:
+	mov	a,@r0
+	clr	c
+	subb	a,#5
+	jc	readfp_aligndiv_nok
+	
+	mov	r2,#10
+	call	div_32_4
+	call	move_r1_r0
+	sjmp	readfp_align_loop
+
+readfp_aligndiv_nok:
+	dec	r5
+	mov	r7,#4
+	
+	call	shl_r0_0
+
+	sjmp	readfp_aligndiv_loop
+	
+readfp_aligndone:
+	mov	a,r5
+	mov	@r0,a
+
+readfp_end:
+	mov	c,_Xsign
+	jmp	packx
+
+
+
+;=============================================================================
+;	FP Stack Handling and register copy Routines
+;=============================================================================
+
+
+;-----	shift stack registers up from X to T
+pushx:
+	mov	r0,#_T
+	mov	r1,#_T+4
+	mov	b,#3*4
+
+pushx0:	dec	r0
+	dec	r1
+	mov	a,@r0
+	mov	@r1,a
+	djnz	b,pushx0
+
+	ret
+
+
+;-----	shift stack registers down from X to T
+popx:
+	mov	r0,#_X+4
+	mov	r1,#_X
+	mov	b,#3*4
+	
+
+;-----	copy 'b' bytes from @r0 to @r1
+movex:	mov	a,@r0
+	mov	@r1,a
+	inc	r0
+	inc	r1
+	djnz	b,movex
+	ret
+
+;-----	copy X to LASTX
+mlastx:	
+	mov	r0,#_X
+	mov	r1,#_LASTX
+	mov	b,#4
+	mov	ptest,r0
+	sjmp	movex
+
+;-----	shift stack registers down from Y to T
+popy:	
+	mov	r0,#_Y+4
+	mov	r1,#_Y
+	mov	b,#2*4
+	sjmp	movex
+
+
+
+;=============================================================================
+;	FP pack/unpack routines
+;=============================================================================
+
+
+;-----	unpack register @r0 to 8 bits exponent and full 24 bits mantissa, sign bit in c
+unpackx:
+	clr	ov
+	inc	r0			;get full exponent
+	mov	a,@r0
+	rlc	a
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	jz	unpackx_ret		;exit with A=0 if value is null
+
+	inc	r0
+	mov	a,@r0
+	setb	c
+	rlc	a
+	rr	a
+	mov	@r0,a
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+
+unpackx_ret:
+	ret
+	
+
+;-----	unpack register @r1 to 8 bits exponent and full 24 bits mantissa, sign bit in c
+unpackx_r1:
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	call	unpackx
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	ret
+
+	
+;-----	pack register @r0 to 1 bit sign, 8 bits exponent and 23 bits mantissa preceded by implicit bit '1'
+packx:	
+	mov	a,@r0
+	jz	unpackx_ret		;exit with A=0 if value is null
+
+	mov	f0,c			;save sign
+	mov	b,#24
+
+packx0:
+	inc	r0
+	mov	a,@r0
+	jb	acc.7,packx1		;jump if msb at correct position
+
+	inc	r0
+	inc	r0
+	clr	c
+	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	mov	a,@r0
+	dec	a
+	mov	@r0,a
+	jz	zerox			;underflow => set to zero
+	
+	djnz	b,packx0
+
+	sjmp	zerox			;all bits null => set to zero
+
+packx1:
+	dec	r0			;point to exponent
+	mov	c,f0			;restore sign
+	mov	a,@r0
+	rrc	a			;shift exponent and insert sign bit
+	mov	@r0,a
+	inc	r0
+	mov	a,@r0
+	rl	a			;pop implicit bit '1'
+	rrc	a			;replace it with exponent lsb
+	mov	@r0,a
+	dec	r0
+	ret
+	
+packx_r1:
+	mov	a,r0
+	push	acc
+	mov	a,r1
+	mov	r0,a
+	call	packx
+	pop	acc
+	mov	r0,a
+	ret
+
+	
+;-----	clear value @r0
+zerox:
+	mov	b,#4
+	clr	a
+
+zerox0:
+	mov	@r0,a
+	inc	r0
+	djnz	b,zerox0
+
+	jmp	sub4_r0
+
+
+;-----	set #INF or #NAN @r0
+infnanx:
+	jz	infx
+
+
+;-----	set #NAN @r0
+nanx:
+	mov	b,#4
+	mov	a,#0FFh
+	sjmp	zerox0
+
+
+;-----	set #INF @r0
+infx:
+	mov	b,#2
+	mov	a,#0FFh
+	rrc	a
+	mov	@r0,a
+	inc	r0
+	clr	a
+	rrc	a
+	mov	@r0,a
+	inc	r0
+	clr	a
+	sjmp	zerox0
+
+
+
+;=============================================================================	
+;	FP arith routines on packed registers
+;=============================================================================	
+
+;-----	Unpack and test packed value @ptest
+;in:	@ptest	packed value to test
+;out:	_A	unpacked value
+;	c	sign
+;	ov	true if #NAN or #INF
+;	a	zero if null or #INF
+;using:	r0,r1
+	public	testfp
+testfp:					;public entry point
+	mov	ptest,r0
+fptest:					;entry point for fp executive
+	mov	r1,ptest
+	mov	r0,#_A
+	call	move_r1_r0
+	jmp	unpackfp
+
+
+;-----	Unpack, convert from integer and check packed value @r0
+;in:	@r0	packed value or 24 bit unsigned integer value to unpack
+;out:	@r0	unpacked value
+;	c	sign
+;	ov	true if #NAN or #INF
+;	a	zero if null or #INF	
+unpackfp_r0:
+unpackfp:
+	inc	r0			;get full exponent
+	mov	a,@r0
+	rlc	a
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	jz	unpackfp2		;integer value or null
+	
+	;normalized floating point value, #INF or #NAN
+	call	unpackx
+	mov	a,@r0
+	inc	a
+	clr	ov
+	
+	jnz	unpackfp1		;normalized number
+	
+	;#INF or #NAN
+	inc	r0
+	mov	a,@r0
+	mov	b,a
+	anl	a,#7Fh
+	mov	@r0,a
+	setb	ov
+	mov	r3,#3
+
+unpackfp0:
+	orl	a,@r0
+	inc	r0
+	djnz	r3,unpackfp0
+	
+	call	sub4_r0
+
+unpackfp1:
+	sjmp	unpackfp_end		;done
+
+unpackfp2:
+	;integer or null
+	mov	r3,#3
+
+unpackfp3:
+	inc	r0
+	orl	a,@r0
+	djnz	r3,unpackfp3
+	
+	call	sub3_r0
+	clr	ov
+	jz	unpackfp_end		;exit if null
+	
+	call	csngx			;convert to floating point
+
+unpackfp_end:
+	ret
+	
+
+;-----	Unpack, convert from integer and check packed value @r1
+;in:	@r1	packed value or 24 bit unsigned integer value to unpack
+;out:	@r1	unpacked value
+;	c	sign
+;	ov	true if #NA or #INF
+;	a	zero if null or #INF
+;	
+unpackfp_r1:
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	call	unpackfp
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	ret	
+
+
+;-----	Pack floating point value, checking for #INF or #NAN
+;in:	@r0	unpacked value to pack
+;	c	sign
+;	ov	true => #NA or #INF
+;	a	zero and ov => #INF
+;out:	@r0	unpacked value
+packfp_r0:
+packfp:
+	jnb	ov,packfp0
+	
+	jmp	infnanx			;store #INF or #NAN
+
+packfp0:
+	mov	a,@r0
+	jnz	packfp1
+	
+	jmp	zerox			;store zero
+
+packfp1:
+	inc	a
+	jnz	packfp2
+
+	jmp	infx
+
+packfp2:
+	jmp	packx
+
+
+;-----	Pack floating point value, checking for #INF or #NAN
+;in:	@r1	unpacked value to pack
+;	c	sign
+;	ov	true => #NA or #INF
+;	a	zero and ov => #INF
+;out:	@r1	unpacked value
+packfp_r1:
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	call	packfp
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	ret	
+
+
+;-----	Swap values @r0 and @r1
+;in:	@r0	1st value
+;	@r1	2nd value
+;out:	@r0	2nd value
+;	@r1	1st value
+;using:	r7
+swapx:
+	mov	r7,#4
+	
+swapx0:
+	mov	a,@r0
+	xch	a,@r1
+	mov	@r0,a
+	inc	r0
+	inc	r1
+	djnz	r7,swapx0
+	
+	jmp	sub4_r0_r1
+
+
+;-----	Addition of packed values @r0 and @r1, result @r0
+;in:	@r0	arg 1 packed
+;	@r1	arg 2 packed
+;out:	@r0	result packed
+;using:	_Xsign	sign of argument 1
+;	@r1	destroyed
+	public	addfp
+addfp:
+	call	unpackfp_r0
+	mov	_Xsign,c		;save sign of @r0
+	jb	ov,addfp_ret
+
+	jnz	addfp1
+
+	call	move_r1_r0		;if @r0 = 0 then @r0 <- @r1; exit
+	call	unpackfp
+	sjmp	addfp_ret
+
+addfp1:	call	unpackfp_r1
+	jb	ov,addfp_ret
+
+	jz	addfp_ret		;if @r1 = 0 then exit
+
+	%xrl	c,_Xsign
+	jnc	addfp3			;jump if same sign
+
+	call	subx			;@r0 <- @r0 - @r1
+	%xrl	c,_Xsign
+	sjmp	addfp_ret
+
+addfp3:	call	addx			;@r0 <- @r0 + @r1
+	mov	c,_Xsign		;sign of result
+
+addfp_ret:
+	jmp	packfp_r0			;pack result
+
+
+;-----	Subtraction of packed values @r0 and @r1, result @r0
+;in:	@r0	arg 1 packed
+;	@r1	arg 2 packed
+;out:	@r0	result packed
+;using:	_Xsign	sign of argument 1
+;	@r1	destroyed
+	public	subfp
+subfp:
+	call	unpackfp_r0
+	mov	_Xsign,c		;save sign of @r0
+	jb	ov,addfp_ret		;exit if #NAN or #INF
+
+	jnz	subfp1
+
+	call	move_r1_r0
+	call	unpackfp_r0
+	cpl	c			;if @r0 = 0 then @r0 <- -@r1; exit
+	sjmp	subfp_ret
+	
+subfp1:	call	unpackfp_r1
+	jb	ov,addfp_ret		;exit if #NAN or #INF
+
+	jz	subfp_ret		;if @r1 = 0 then exit
+
+	;compare signs
+	%xrl	c,_Xsign
+	jc	subfp3			;jump if not same sign
+
+	call	subx			;@r0 <- @r0 - @r1
+	%xrl	c,_Xsign
+	sjmp	subfp_ret
+
+subfp3:	call	addx			;@r0 <- @r0 + @r1
+	mov	c,_Xsign		;sign of result
+
+subfp_ret:
+	jmp	packfp			;pack result
+	
+
+;-----	change sign of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	
+	public	chsfp
+chsfp:
+	call	unpackx
+	call	chsx
+	call	packx
+	ret
+
+
+;-----	integer portion of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	
+	public	intfp
+intfp:	call	unpackfp_r0
+	jb	ov,intfp_ret
+	
+	push	psw
+	call	intx
+	pop	psw
+
+intfp_ret:
+	jmp	packfp_r0
+
+	
+;-----	fractional portion of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	
+	public	fracfp
+fracfp:	call	unpackfp_r0
+	jb	ov,fracfp_ret
+	
+	push	psw
+	call	fracx
+	pop	psw
+
+fracfp_ret:
+	jmp	packfp_r0
+	
+
+;-----	Multiply 2 packed values
+;in:	@r0	arg 1 packed
+;	@r1	arg 2 packed
+;out:	@r0	result packed
+;using:	_Xsign	sign of argument 1
+;	_A	by mulx
+;	@r1	destroyed
+	public	mulfp
+mulfp:	call	unpackfp_r0
+	mov	_Xsign,c
+	mov	c,ov
+	mov	_Xov,c	
+	jz	mulfp_z
+	
+	call	unpackfp_r1
+	jz	mulfp_z
+
+	%xrl	c,_Xsign	
+	mov	_Xsign,c		;multiply signs
+	
+	mov	c,ov
+	orl	c,_Xov
+	mov	ov,c
+	mov	c,_Xsign
+	
+	clr	a
+	jb	ov,mulfp_ov
+	
+	call	mulx			;multiply values
+	mov	c,_Xsign
+	jmp	packfp_r0
+	
+mulfp_z:
+	jb	ov,mulfp_ov
+	jmp	zerox
+
+mulfp_ov:
+	jmp	infnanx
+	
+
+;-----	Divide 2 packed values
+;in:	@r0	arg 1 packed
+;	@r1	arg 2 packed
+;out:	@r0	result packed
+;using:	_Xsign	sign of argument 1
+;	_A	by divx
+;	@r1	destroyed
+	public	divfp
+divfp:	call	unpackfp_r0
+	mov	_Xsign,c
+	mov	c,ov
+	mov	_Xov,c	
+	jnz	divfp5
+	
+	;dividend is null or #INF
+	call	unpackfp_r1
+	
+	%xrl	c,_Xsign
+	mov	_Xsign,c
+	
+	mov	c,ov
+	orl	c,_Xov
+	mov	ov,c
+	mov	c,_Xsign
+
+	jnz	divfp2			;jump if @r1 is not null or #NAN
+	
+	;divisor is null or #INF
+	jnb	ov,divfp1		;jump if @r1 is null
+
+	;divisor is #INF
+	%ljnb	_Xov,zerox		;0 / #INF -> 0
+	jmp	nanx			;#INF / #INF -> #NAN
+
+divfp1:
+	;divisor is null
+	%ljnb	_Xov,nanx		;0 / 0 -> #NAN
+	jmp	infx			;#INF / 0 -> #INF
+	
+divfp2:
+	;divisor is not null or #NAN
+	jnb	ov,divfp3		;jump if @r1 is not null
+	
+	;divisor is #NAN
+	jmp	nanx			;??? / #NAN -> #NAN
+
+	;divisor is not null
+divfp3:	jmp	zerox			;0 / ??? -> 0
+	
+;============== TODO
+	
+
+divfp5:
+	;dividend is not null or #NAN
+	%ljb	ov,nanx			;#NAN / ??? -> #NAN
+	
+	call	unpackfp_r1
+	
+	%xrl	c,_Xsign		;multiply signs	
+	mov	_Xsign,c
+	
+	%ljz	infx			;??? / 0 -> #INF
+
+	mov	c,ov
+	orl	c,_Xov
+	mov	ov,c
+	mov	c,_Xsign
+	
+	clr	a
+	jnb	ov,divfp9
+	
+	;dividend not null and divisor
+divfp9:
+	mov	a,r1
+	push	acc
+	call	divx			;divide values
+	pop	acc
+	mov	r1,a
+	mov	c,_Xsign
+	jmp	packfp_r0
+
+
+;-----	Inverse of packed value
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by divx
+;	_B	copy of @r0
+	public	invfp
+invfp:	call	unpackfp_r0
+	jb	ov,invfp_ov		;TODO: #INF
+	
+	setb	ov
+	jz	invfp_ov
+	
+	clr	ov
+	mov	_Xsign,c
+	mov	r1,#_B
+	call	move_r0_r1		;B <- x
+	push	dpl
+	push	dph
+	mov	dptr,#ONE_
+	call	move_cdptr_r0
+	pop	dph
+	pop	dpl
+	call	divx
+	mov	c,_Xsign
+	jmp	packfp_r0
+
+invfp_ov:
+	jmp	infnanx
+
+
+;-----	Square root of packed value
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sqrtx
+;	_B	by sqrtx
+;	_C	by sqrtx
+;	_D	by sqrtx
+	public	sqrtfp
+sqrtfp:	call	unpackfp_r0
+	jz	sqrtfpz
+	%ljc	nanx
+
+	call	sqrtx
+	jmp	packfp_r0
+	
+sqrtfpz:
+	jmp	zerox
+
+
+;-----	Square of packed value
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by mulx
+;	_D	copy of X
+	public	pow2fp
+pow2fp:	call	unpackfp_r0
+	%ljb	ov,infnanx
+	mov	r1,#_D
+	call	move_r0_r1
+	call	mulx
+	jmp	packfp_r0	
+
+
+;-----	Natural logarithm of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by lnx
+;	_B	by lnx
+;	_C	by lnx
+;	_D	by lnx
+	public	lnfp
+lnfp:	call	unpackfp_r0
+	%ljc	nanx			;ln(x) -> #NAN if x < 0 or x = -#INF
+	%ljb	ov,infnanx		;ln(+#INF) -> +#INF, ln(#NAN) -> #NAN
+	
+	setb	c
+	%ljz	infx			;ln(0) = -#INF
+
+	call	lnx			;x > 0 and x != #+INF
+
+	jmp	packfp_r0
+
+
+;-----	Base 10 logarithm of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by lnx
+;	_B	by lnx
+;	_C	by lnx
+;	_D	by lnx
+;algo:	log(x) = ln(x) / ln(10)
+	public	logfp
+logfp:	call	lnfp
+	call	unpackfp_r0
+	%ljb	ov,infnanx
+	
+	mov	_Xsign,c
+	
+	push	dpl
+	push	dph
+	mov	dptr,#LOG10E_
+	mov	r1,#_D
+	call	move_cdptr_r1
+	pop	dph
+	pop	dpl
+	
+	call	mulx
+	
+	mov	c,_Xsign
+	
+	jmp	packfp_r0
+
+
+;-----	exponential of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by expx
+;	_B	by expx
+;	_C	by expx
+;	_D	by expx
+;algo:	exp(x)	= 1/exp(-x) if x < 0
+	public	expfp
+expfp:	call	unpackfp_r0
+	jnc	expfp0			;skip if positive
+	jnz	expfp0			;skip if not null or #INF
+	%ljb	ov,zerox		;exp(-#INF) -> 0
+expfp0:	%ljb	ov,infnanx		;exp(+#INF) -> +#INF, exp(#NAN) -> #NAN
+	jz	expfpz			;exp(0) -> 1
+	
+	;compute exp(|x|)
+	push	psw
+	call	expx
+	pop	psw
+	jnc	expfp_end
+	
+	;inverse result if x<0
+	mov	r1,#_B
+	call	move_r0_r1
+	push	dpl
+	push	dph
+	mov	dptr,#ONE_
+	call	move_cdptr_r0
+	pop	dph
+	pop	dpl
+	call	divx
+expfp_end:
+	jmp	packfp_r0
+
+expfpz:
+	;return exp(0) = 1
+	push	dpl
+	push	dph
+	mov	dptr,#ONE_
+	call	move_cdptr_r0
+	pop	dph
+	pop	dpl
+	sjmp	expfp_end
+
+
+;-----	sine of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sinx
+;	_B	by sinx
+;	_C	by sinx
+;	_D	by sinx
+;algo:	sin(x)	= sin( 2Pi * ( -0.5 + frac( ( x + 0.5 ) / 2Pi ) ) )
+;		= -sin( 2Pi * ( -0.5 + frac( x / 2Pi ) ) )
+;		= -sin(-x) if x < 0
+;		= sin( Pi/2 + |Pi/2 - x| ) by power series if 0 <= x < Pi
+	public	sinfp
+sinfp:	call	unpackfp_r0
+	%ljb	ov,nanx			;sin(#INF) or sin(#NAN) -> #NAN
+	%ljz	zerox			;sin(0) -> 0
+
+	cpl	c	
+	mov	_Xsign,c
+
+	clr	c			;absolute value
+	push	dpl
+	push	dph
+	
+	mov	dptr,#TWOPI_
+	mov	r1,#_B
+	call	move_cdptr_r1
+
+	call	divx			;A = X / (2.pi)
+
+	call	fracx			;0 <= A < 1
+
+	mov	dptr,#DOT5_
+	mov	r1,#_C
+	call	move_cdptr_r1
+
+	call	subx			;A' = A - 0.5
+					;-0.5 <= A' < 0.5
+					;0 <= |A'| <= 0.5
+	%xrl	c,_Xsign
+	mov	_Xsign,c		;multiply signs
+	
+	mov	dptr,#DOT25_
+	mov	r1,#_C
+	call	move_cdptr_r1
+
+	call	subx			;A" = |A'| - 0.25
+					;-0.25 <= A" < 0.25
+					;0 <= |A"| <= 0.25
+	
+	;A" < 0  <=>  |A'| < 0.25
+	;A" >= 0  <=>  |A'| >= 0.25
+	call	subx			;|A'| < 0.25   =>  |A"| - 0.25 = -A" - 0.25 = |A'|
+	clr	c			;|A'| >= 0.25  =>  |A"| - 0.25 =  A" - 0.25 = |A'| - 0.5
+
+	mov	r1,#_B
+	call	mulx
+	
+	pop	dph
+	pop	dpl
+	
+	call	sinx
+	mov	c,_Xsign
+
+	jmp	packfp_r0
+
+
+;-----	cosine of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sinx
+;	_B	by sinx
+;	_C	by sinx
+;	_D	by sinx
+;algo:	cos(x) = sin( x + Pi/2 )
+	public	cosfp
+cosfp:	push	dpl
+	push	dph
+	
+	mov	dptr,#HALFPI_
+	mov	r1,#_A
+	call	move_cdptr_r1
+	
+	pop	dph
+	pop	dpl
+	
+	call	packfp_r1
+	
+	call	addfp
+
+	jmp	sinfp
+
+
+;-----	tangent of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sinx
+;	_B	by sinx
+;	_C	by sinx
+;	_D	by sinx
+;algo:	tan(x) = sin(x) / cos(x)
+	public	tanfp
+tanfp:	mov	r7,#4
+
+tanfp0:	mov	a,@r0
+	push	acc
+	inc	r0
+	djnz	r7,tanfp0
+
+	dec	r0
+	dec	r0
+	dec	r0
+	dec	r0
+	
+	
+	call	cosfp
+	
+	pop	_D+3
+	pop	_D+2
+	pop	_D+1
+	pop	_D+0
+	
+	mov	r1,#_D
+	
+	mov	r7,#4
+	
+tanfp1:	mov	a,@r0
+	push	acc
+	inc	r0
+	djnz	r7,tanfp1
+
+	dec	r0
+	dec	r0
+	dec	r0
+	dec	r0
+	
+	call	move_r1_r0
+	
+	call	sinfp
+	
+	pop	_D+3
+	pop	_D+2
+	pop	_D+1
+	pop	_D+0
+	
+	mov	r1,#_D
+	
+	jmp	divfp
+	
+
+;-----	arctangent of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by atanx,divx
+;	_B	by atanx
+;	_C	by atanx
+;	_D	by atanx
+;algo:
+;	arctan(x) = -arctan(-x) if x < 0
+;		  = Pi/2 - arctan(1/x) if x >= 1
+;		  = ( 1 - x^3/3 + x^5/5 - ... ) if 0 <= x <= 1
+	public	atanfp
+atanfp:	call	unpackfp_r0		;TODO: atan(+/-#INF) -> +/-PI/2
+	%ljb	ov,infnanx		;atan(#NAN) -> #NAN
+	%ljz	zerox			;atan(0) -> 0
+
+	mov	_Xsign,c
+
+atanfpu:				;jump here from asinfp
+	mov	a,@r0
+	add	a,#81h
+	jc	atanfp1
+
+	call	atanx			;power series
+
+atanfp0:
+	mov	c,_Xsign
+	jmp	packfp_r0
+
+atanfp1:
+	push	dpl
+	push	dph
+
+	mov	r1,#_B
+	call	move_r0_r1
+
+	mov	dptr,#ONE_
+	call	move_cdptr_r0
+
+	call	divx
+
+	call	atanx			;;power series
+
+	mov	dptr,#HALFPI_
+	mov	r1,#_B
+	call	move_cdptr_r1
+
+	call	subx
+
+	pop	dph
+	pop	dpl
+	sjmp	atanfp0
+
+
+;-----	arcsine of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sqrtx,mulx,divx
+;	_B	by sqrtx
+;	_C	by sqrtx
+;	_D	by sqrtx
+;algo:
+;	arcsin(x) = arctan( x / sqrt( 1 - x² ) )
+;		  = +/- PI/2  if  x = +/- 1
+	public	asinfp
+asinfp:	call	unpackfp_r0		;
+	%ljb	ov,infnanx		;asin(#NAN) -> #NAN
+	%ljz	zerox			;asin(0) -> 0
+
+	mov	_Xsign,c
+
+
+	mov	r1,#_D
+	call	move_r0_r1
+	call	mulx			;x^2
+	call	move_r0_r1
+	
+	push	dpl
+	push	dph
+
+	mov	r1,#_B
+	mov	dptr,#ONE_
+	call	move_cdptr_r1
+
+	pop	dph
+	pop	dpl
+	
+	call	subx			;1 - x^2 = | x^2 - 1 |
+	
+	jz	asinfp0			;if zero, return PI/2
+	%ljnc	nanx
+	sjmp	asinfp1
+
+asinfp0:
+	push	dpl
+	push	dph
+
+	mov	r1,#_B
+	mov	dptr,#HALFPI_
+	call	move_cdptr_r0
+
+	pop	dph
+	pop	dpl
+	
+	mov	c,_Xsign
+	
+	jmp	packfp_r0
+
+	;normal operation
+asinfp1:
+	mov	r1,#_D
+	call	swapx
+	call	divx			;x^2 / ( 1 - x^2 )
+	
+	call	sqrtx			;sqrt( x^2 / ( 1 - x^2 ) )
+	
+	jmp	atanfpu			;arctan( sqrt( x^2 / ( 1 - x^2 ) ) )
+
+
+;-----	arccosine of packed value @r0
+;in:	@r0	arg packed
+;out:	@r0	result packed
+;using:	_A	by sqrtx,mulx,divx
+;	_B	by sqrtx
+;	_C	by sqrtx
+;	_D	by sqrtx
+;algo:
+;	arccos(x) = PI/2 - arcsin(x)
+	public	acosfp
+acosfp:	call	asinfp
+	
+	push	dpl
+	push	dph
+	
+	mov	dptr,#HALFPI_
+	mov	r1,#_A
+	call	move_cdptr_r1
+	
+	pop	dph
+	pop	dpl
+	call	packfp_r1
+	
+	call	subfp
+	
+	mov	a,@r0
+	clr	acc.7
+	mov	@r0,a
+	
+	ret
+
+
+;-----	exponentiation
+;in:	@r0	arg 1 packed
+;	@r1	arg 2 packed
+;out:	@r0	result packed
+;using:	_Xsign	sign of argument 1
+;using:	_A	by lnx and expx,mulx,divx
+;	_B	by lnx and expx
+;	_C	by lnx and expx
+;	_D	by lnx and expx
+;	@r1	destroyed
+;algo:
+;	pow( x, y ) = exp( x * ln(y) )
+;TODO:	#INF and #NAN
+	public	powfp
+powfp:	call	unpackfp_r0
+
+	%ljb	ov,infnanx		;pow(#INF|#NAN,y) -> #INF|#NAN
+	
+	%ljz	zerox			;pow(0,y) -> 0
+	
+	%ljc	nanx			;pow(-|x|,y) -> #NAN
+	
+	mov	a,r1
+	push	acc
+	call	lnx
+	mov	_Xsign,c
+	pop	acc
+	push	acc
+	mov	r1,a
+	call	unpackfp_r1
+					;TODO: inf/nan
+	%xrl	c,_Xsign
+	mov	_Xsign,c
+	call	mulx
+	call	expx
+	mov	c,_Xsign
+	jnc	powfp1
+	
+	call	move_r0_r1
+	push	dpl
+	push	dph
+	mov	dptr,#ONE_
+	call	move_cdptr_r0
+	pop	dph
+	pop	dpl
+	call	divx
+
+powfp1:	
+	pop	acc
+	mov	r1,a
+	jmp	packx
+
+
+
+;-----	load constant PI
+;out:	@r0	packed constant PI
+	public	pifp
+pifp:	
+	push	dpl
+	push	dph
+	mov	dptr,#PI_
+	
+	sjmp	bconst
+
+
+;-----	load constant E
+;out:	@r0	packed constant PI
+	public	efp
+efp:	
+	push	dpl
+	push	dph
+	mov	dptr,#E_
+	
+bconst:
+	call	move_cdptr_r0
+	
+	pop	dph
+	pop	dpl
+	
+	jmp	packfp
+
+
+
+;=============================================================================	
+;	FP arith routines on unpacked values
+;=============================================================================	
+
+
+;-----	align exponents @r0 and @r1 for additions and subtractions
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	arg 1 unpacked and aligned with arg 2
+;	@r1	arg 2 unpacked and aligned with arg 1
+;using:	
+expalign:
+	mov	a,@r0			;compare 2's exponents
+	clr	c
+	subb	a,@r1
+	jz	expalign_ret		;return if both exponents equal
+	jc	exal1			;jump if @r0 < @r1
+
+	;@r0 > @r1 => shift mantissa @r1 right and inc @r1 exponent
+	inc	@r1			;increment exponent
+	inc	r1
+	clr	c
+	mov	r3,#3
+
+exal01:	mov	a,@r1			;shift mantissa right
+	rrc	a
+	mov	@r1,a
+	inc	r1
+	djnz	r3,exal01
+
+	mov	a,r1
+	add	a,#low(-4)
+	mov	r1,a
+	sjmp	expalign		;do compare again
+
+	;@r0 > @r1 => shift mantissa @r1 right and inc @r1 exponent
+exal1:	inc	@r0			;increment exponent
+	inc	r0
+	clr	c
+	mov	r3,#3
+
+exal11:	mov	a,@r0			;shift mantissa right
+	rrc	a
+	mov	@r0,a
+	inc	r0
+	djnz	r3,exal11
+
+	mov	a,r0
+	add	a,#low(-4)
+	mov	r0,a
+	sjmp	expalign		;do compare again
+	
+expalign_ret:
+	ret
+
+
+;-----	align mantissa
+;in:	@r0	arg 1 unpacked
+;out:	@r0	arg 1 unpacked with mantissa high bit equal to 1 if mantissa not null
+;using:	r2,r3
+mantalign:
+	mov	r2,#24
+	
+malig0:	inc	r0
+	mov	a,@r0
+	jb	acc.7,malig2		;high bit is 1 => exit
+	
+	inc	r0
+	inc	r0
+	mov	r3,#3
+	clr	c
+	
+malig1:	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	djnz	r3,malig1
+	
+	dec	@r0
+	djnz	r2,malig0
+	
+	;mantissa is null => clear exponent and sign
+	clr	a
+	mov	@r0,a
+	clr	c
+	ret
+
+malig2:	dec	r0			;restore ptr
+	ret
+
+;-----	add 2 unpacked values (not null)
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	result
+;using:	@r1	destroyed
+addx:	call	expalign
+
+	call	add3_r0_r1
+	clr	c
+	mov	r3,#3
+
+addx21:	mov	a,@r0			;addition loop
+	addc	a,@r1
+	mov	@r0,a
+	dec	r0
+	dec	r1
+	djnz	r3,addx21
+
+	;overflow?
+	jnc	addx3			;jump if no overflow
+
+	;if yes, shift right carry in mantissa and increment exponent
+	inc	@r0
+	setb	ov
+	mov	a,@r0
+	inc	a
+	jz	addx3			;jump with ov=true if overflow
+	
+	inc	r0
+	mov	r3,#3
+addx22:	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	inc	r0
+	djnz	r3,addx22
+
+	call	sub4_r0	
+
+	clr	ov
+
+addx3:	ret
+
+
+;-----	subtract 2 unpacked values (not null)
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	result
+;	c	1 if result < 0
+;using:	@r1	destroyed
+subx:	call	expalign
+
+	call	add3_r0_r1
+	clr	c
+	mov	r3,#3
+
+subx21:	mov	a,@r0			;subtraction loop
+	subb	a,@r1
+	mov	@r0,a
+	dec	r0
+	dec	r1
+	djnz	r3,subx21
+
+	;overflow?
+	jnc	subx3			;jump if no overflow
+
+	;if yes, complement result to 2
+	mov	r3,#3
+	inc	r0
+	inc	r0
+	inc	r0
+subx22:	clr	a
+	subb	a,@r0
+	mov	@r0,a
+	dec	r0
+	djnz	r3,subx22
+
+	;here C should still be set
+	;TODO: assign #+INF if overflow	
+
+subx3:	push	psw			;save sign
+	call	mantalign		;align mantissa
+	pop	psw
+	clr	ov			;no overflow
+	ret
+
+
+;-----	change sign @r0 (sign bit in C)
+;in:	@r0	arg 1 unpacked
+;	c	1 if arg 1 < 0
+;out:	@r0	result
+;	c	1 if result < 0
+chsx:
+	mov	a,@r0
+	jz	chsx_ret		;don't if null
+	cpl	c
+chsx_ret:
+	ret
+
+
+;-----	integer portion of @r0
+;in:	@r0	arg 1 unpacked
+;out:	@r0	result
+intx:	call	mintx
+	jmp	mantalign
+
+
+;-----	convert @r0 to 24 bit unsigned integer
+;in:	@r0	arg 1 unpacked
+;out:	@r0	result
+cintx:	mov	a,@r0
+	jz	cintx1
+	
+	call	mintx
+;	clr	a
+	jnz	cintx1
+	
+	mov	@r0,a			;clear exponent if conversion OK
+cintx1:
+	ret
+
+
+;-----	mantissa integer portion of @r0
+;in:	@r0	arg 1 unpacked
+;out:	@r0	result
+mintx:	mov	a,@r0
+	clr	c
+	subb	a,#96h
+	jnc	mintx_ret
+	
+	inc	@r0
+	mov	r3,#3
+	clr	c
+	
+mintx0:	inc	r0
+	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	djnz	r3,mintx0
+	
+	dec	r0
+	dec	r0
+	dec	r0
+	sjmp	mintx
+
+mintx_ret:
+	ret
+
+
+;-----	convert unsigned 24 bit integer to unpacked float
+;in:	@r0	unsigned 24 bit integer to convert
+csngx:	
+	mov	r2,#23+7Fh
+
+csngx_loop:
+	mov	a,@r0
+	jz	csngx_ok
+
+	inc	r2
+	
+	call	shr_r0_0
+
+	sjmp	csngx_loop
+	
+csngx_ok:
+	mov	a,r2
+	mov	@r0,a
+	jmp	mantalign
+
+
+;-----	fractional portion of @r0
+;in:	@r0	arg 1 unpacked
+;out:	@r0	result
+fracx:	mov	a,@r0
+	clr	c
+	subb	a,#7Fh
+	jc	fracx_ret
+	
+	dec	@r0
+	inc	r0
+	inc	r0
+	inc	r0
+	mov	r3,#3
+	clr	c
+	
+fracx0:	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	djnz	r3,fracx0
+	
+	sjmp	fracx
+
+fracx_ret:
+	jmp	mantalign
+
+
+;-----	mantissa multiplication of unpacked values @r0 <- @r0 * @r1
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	result (2's exponents not modified)
+;	c	1 if product of mantissas >= 2
+;using:	_A	shift register
+mmulx:
+	mov	b,r0
+	mov	r0,#_A
+	mov	r3,#3
+	clr	a
+	
+mulx0:	inc	r0
+	mov	@r0,a
+	djnz	r3,mulx0
+
+	mov	r2,#24
+	clr	c
+	
+mulx1:	
+	;shift _A right
+	;flag c from previous addition could be shifted in also
+	mov	r0,#_A
+	mov	r3,#3
+	
+mulx2:	inc	r0
+	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	djnz	r3,mulx2
+	
+	;shift @r0 right
+	mov	r0,b
+	mov	r3,#3
+	clr	c
+	
+mulx3:	inc	r0
+	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	djnz	r3,mulx3
+	
+	;check last bit
+	jnc	mulx5
+	
+	mov	r0,#_A
+
+	;if 1, add @r1 to _A
+	call	add3_r0_r1
+	mov	r3,#3
+	clr	c
+
+mulx4:	mov	a,@r0
+	addc	a,@r1
+	mov	@r0,a
+	dec	r0
+	dec	r1
+	djnz	r3,mulx4
+
+mulx5:	djnz	r2,mulx1		;next bit
+	
+	jnc	mulx7
+	
+	;if overflow from last addition, shift right
+	mov	r3,#3
+	
+mulx6:	inc	r0
+	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	djnz	r3,mulx6
+	
+	setb	c
+	
+mulx7:
+	mov	r0,b
+
+	mov	a,r1
+	push	acc
+
+	;move result mantissa
+	mov	r1,#_A
+	mov	r3,#3
+
+mulx8:	inc	r0
+	inc	r1
+	mov	a,@r1
+	mov	@r0,a
+	djnz	r3,mulx8
+	
+	call	sub3_r0
+
+	pop	acc
+	mov	r1,a
+	
+	ret
+
+
+;-----	multiply 2 unpacked values @r0 <- @r0 * @r1
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	result
+;	ov	set if overflow
+;using:	_A	by mmulx
+mulx:	
+	call	mmulx			;multiply mantissa
+	
+	;add 2's exponents
+	mov	a,@r1
+	addc	a,#0h			;add overflow bit from last addition
+	cpl	c
+	jnc	mulxov			;jump if overflow
+	
+	add	a,#80h			;convert to signed byte
+	xch	a,@r0	
+	add	a,#80h			;convert to signed byte
+	add	a,@r0
+	jb	ov,mulxov		;jump if overflow
+	
+	add	a,#81h
+	clr	c
+	jz	mulxov			;jump if overflow
+	
+	mov	@r0,a
+	
+	clr	ov
+	
+	;done
+	ret
+	
+	;handle overflow
+mulxov:	jc	mulovz			;if underflow, set to zero
+	setb	ov
+	clr	a
+	ret
+mulovz:	clr	ov
+	jmp	zerox
+
+
+;-----	divide 2 unpacked values @r0 <- @r0 / @r1
+;in:	@r0	arg 1 unpacked
+;	@r1	arg 2 unpacked
+;out:	@r0	result
+;using:	_A	quotient mantissa
+;	r1	destroyed
+divx:	
+	mov	b,r0
+	mov	r0,#_A
+	mov	r3,#3
+	clr	a
+	
+divx0:	inc	r0
+	mov	@r0,a
+	djnz	r3,divx0
+	
+	mov	r4,a		;remainder
+	mov	r2,#24
+	clr	c
+	
+divx1:	;if r4 > 0 then ok to sub
+	mov	r0,b
+	mov	a,r4
+	jnz	divx21
+	
+	;try to sub
+	call	add3_r0_r1
+	mov	r3,#3
+	clr	c
+
+divx2:	mov	a,@r0
+	subb	a,@r1
+	dec	r0
+	dec	r1
+	djnz	r3,divx2
+	
+	mov	a,r4
+	subb	a,#0
+	
+	jc	divx4		;jump if can't sub
+	
+	;do the sub
+divx21:
+	call	add3_r0_r1
+	mov	r3,#3
+	clr	c
+
+divx3:	mov	a,@r0
+	subb	a,@r1
+	mov	@r0,a
+	dec	r0
+	dec	r1
+	djnz	r3,divx3
+	
+	;mov	a,r4
+	;subb	a,#0
+	;mov	r4,a
+	mov	r4,#0		;if 0.1XXX < 0.1YY then 1.XXX - 0.1YY = 0.ZZZ 
+	clr	c
+	
+divx4:	
+	;shift bit in quotient
+	cpl	c
+	mov	r0,#_A+3
+	mov	r3,#3
+
+divx5:	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	djnz	r3,divx5
+
+	;shift dividend
+	mov	r0,b
+	inc	r0
+	inc	r0
+	inc	r0
+	mov	r3,#3
+	clr	c
+
+divx6:	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	dec	r0
+	djnz	r3,divx6
+	
+	mov	a,r4
+	rlc	a
+	mov	r4,a
+
+	djnz	r2,divx1
+
+	mov	r0,b
+	
+dbk:
+	;sub 2's exponents
+	mov	a,@r0
+	add	a,#7fh			;add overflow bit from last addition
+	clr	c
+	subb	a,@r1
+	mov	@r0,a
+	;TODO: check overflow
+	clr	ov			;temporary
+
+	;move result mantissa
+	mov	r1,#_A
+	mov	r3,#3
+
+divx8:	inc	r0
+	inc	r1
+	mov	a,@r1
+	mov	@r0,a
+	djnz	r3,divx8
+	
+	call	sub3_r0_r1
+	
+	call	mantalign
+	
+	;done
+	ret
+
+
+;-----	square root of @r0
+;in:	@r0	arg 1 unpacked
+;out:	@r0	result
+;using:	_A	by mulx and divx
+;	_B	radicand
+;	_C	intermediate 
+;	_D	radicand/intermediate
+;	r1	destroyed
+;algo:	
+;function sqrt(x)
+;begin
+;	r <- x with exponent divided by 2 (1st guess)
+;	repeat 4 times
+;	begin
+;		r <- ( r + x/r ) / 2
+;	end
+;	return r
+;end
+sqrtx:	mov	r1,#_B
+	call	move_r0_r1		;save radicand X to B
+
+	mov	a,@r0			;divide exponent by 2 (1st guess)
+	add	a,#81h
+	mov	c,acc.7			;shift right arithmetical
+	rrc	a
+	add	a,#7Fh
+	mov	@r0,a
+
+	push	dpl
+	push	dph
+
+	mov	b,#4
+
+sqrtx0:	push	b
+
+	mov	r1,#_C
+	call	move_r0_r1		;C <- X
+
+	mov	a,r0
+	push	acc
+
+	mov	r0,#_D			;D <- B
+	mov	r1,#_B
+	call	move_r1_r0
+
+	mov	r1,#_C
+	call	divx			;D <- D/C = B/X
+
+	mov	a,r0
+	mov	r1,a
+	pop	acc
+
+	mov	r0,a
+	call	addx			;X <- X + D = X + B/X
+
+	mov	dptr,#DOT5_
+	call	move_cdptr_r1		;D <- 0.5
+
+	call	mulx			;X <- X * 0.5 = ( X + B/X ) / 2
+
+	pop	b
+
+	djnz	b,sqrtx0
+	
+	pop	dph
+	pop	dpl
+	
+	ret
+
+
+;-----	Neperian logarithm of @r0
+;in:	@r0	arg 1 unpacked = x
+;out:	@r0	result unpacked = ln(x) = ln(2) * log_2(x)
+;	c	result sign
+;using:	_A	used by log2x
+;	_B	used by log2x
+;	_C	used by log2x
+;	_D	used by log2x
+;	r1	destroyed
+;algo:
+;	ln(x) = log_2(x) * ln(2)
+lnx:
+	call	log2x			;compute log_2(x)
+	push	psw			;save sign
+	mov	r1,#_B
+	push	dpl
+	push	dph
+	mov	dptr,#LN2_		;load and unpack ln(2)
+	call	move_cdptr_r1
+	pop	dph
+	pop	dpl
+	call	mulx			;multiply by ln(2)
+	pop	psw			;restore sign
+	ret
+
+
+;-----	Base 2 Logarithm of @r0
+;in:	@r0	arg 1 unpacked = x
+;out:	@r0	result unpacked = log_2(x)
+;	c	result sign
+;using:	_A	used by mulx
+;	_B	frac part of log
+;	_C	significand
+;	_D	significand^2
+;	r1	destroyed
+;algo:
+;function log_2(x)
+;begin
+;	p <- 1
+;	r <- 0
+;	c <- mantissa of x with 1 <= c < 2
+;	e <- exponent of x
+;	repeat 24 times:
+;	begin
+;		p <- p/2
+;		c <- c*c
+;		if c >= 2 then
+;		begin
+;			c <- c / 2
+;			r <- r + p
+;		end
+;	end
+;	r <- r + e
+;	return r
+;end
+log2x:	
+	mov	r1,#_B
+	mov	@r1,#7Eh		;2's exponent of fractional part
+	mov	r1,#_C
+	call	move_r0_r1
+	
+	;compute fractional part
+	mov	b,#24
+
+log2x0:	
+	push	b
+	;square significand
+	mov	r1,#_C
+	mov	a,r0
+	push	acc
+	mov	r0,#_D
+	call	move_r1_r0
+	call	mmulx			;multiply mantissas (log bit in c)
+	call	move_r0_r1
+	pop	acc
+	mov	r0,a
+	
+	;shift log bit in _B
+	mov	r1,#_B+3
+	mov	r3,#3
+
+log2x1:	mov	a,@r1
+	rlc	a
+	mov	@r1,a
+	dec	r1
+	djnz	r3,log2x1
+
+	pop	b	
+	djnz	b,log2x0		;next bit
+
+	;compute integer part
+	mov	a,#86h
+	xch	a,@r0
+	clr	c
+	subb	a,#7Fh
+	jnc	log2x2			;if 2's exponent<0, change sign
+	
+	cpl	a			;2's complement
+	inc	a
+log2x2:
+	push	psw			;save sign
+	mov	r3,#3
+log2x3:
+	inc	r0
+	mov	@r0,a
+	clr	a
+	djnz	r3,log2x3
+
+	call	sub3_r0
+
+	;align mantissas
+	mov	b,#2
+log2x4:	
+	call	mantalign
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	djnz	b,log2x4
+
+	;add integer and fractional parts
+	
+	pop	psw			;restore sign
+	
+	jc	log2x5			;jump to subtract
+	
+	call	addx
+	clr	c			;result is positive
+	ret
+
+log2x5:	
+	call	subx
+	setb	c			;result is negative
+	ret
+
+
+;-----	Exponential of unpacked positive value @r0
+;in:	@r0	arg 1 unpacked = x
+;out:	@r0	result unpacked = exp(x)
+;using:	_D	argument x ; 
+;	_C	x / ln(2) = x * log_2(e)
+;	_B	term of Taylor's series
+;	_A	used by mulx
+;	r1	destroyed
+;algo:
+;	exp(x)	= 2^( x * log_2(e) )
+;		= 2^frac( x * log_2(e) ) * 2^int( x * log_2(e) )
+;		= e^( frac( x * log_2(e) ) * ln(2) ) * 2^int( x * log_2(e) )
+;		= exp( t ) * 2^n
+;		= ( 1 + t + t^2/2! + t^3/3! + ... + t^i/i! + ... ) * 2^n
+;	where 	t = frac( x * log_2(e) ) * ln(2)
+;		n =  int( x * log_2(e) )
+;
+;function exp(x)
+;begin
+;	c <- x / ln(2) = x * log_2(e)
+;	n <- int(c)
+;	t <- frac(c) * ln(2)
+;	r <- 0
+;	i <- 0
+;	repeat 9 times:
+;	begin
+;		r <- r + ( t^i / i! )
+;		i <- i + 1
+;	end
+;	r <- r * 2^n
+;	return r
+;end
+expx:	push	dpl
+	push	dph
+	mov	r1,#_D
+	call	move_r0_r1		;D <- x
+	mov	a,r0
+	push	acc
+	mov	r0,#_C
+	mov	dptr,#LOG2E_
+	call	move_cdptr_r0		;C <- log_2(e)
+	call	mulx			;C <- x * log_2(e) = x/ln(2)
+	
+	;compute integer part of C
+	clr	c
+	mov	a,#86h
+	subb	a,@r0
+	mov	r3,a
+	jc	expx1			;TODO: #INF
+
+	inc	r0
+	mov	a,@r0
+	dec	r0
+	cjne	r3,#0,expx0
+	sjmp	expx1
+
+expx0:	clr	c			;shift right
+	rrc	a
+	jz	expx1			;exit loop if a is null
+	
+	djnz	r3,expx0
+	
+expx1:	mov	r7,a			;save integer part of C
+	
+	call	fracx			;C <- frac(C) = frac(x/ln(2))
+	mov	r1,#_D
+	mov	dptr,#LN2_
+	call	move_cdptr_r1		;D <- ln(2)
+	call	mulx			;C <- C*ln(2) = frac(x/ln(2)) * ln(2) = t
+	mov	dptr,#ONE_
+	call	move_cdptr_r1		;D <- 1
+	
+	pop	acc
+	mov	r0,a
+	call	move_r1_r0		;X <- 1
+	
+	mov	b,#8			;# of coefficients
+	mov	dptr,#FCTINV_
+	clr	_Bsign
+	call	polyx
+
+	mov	a,@r0
+	add	a,r7			;TODO: #INF
+	mov	@r0,a
+
+	pop	dph
+	pop	dpl
+	
+	ret
+	
+	
+;-----	sine of unpacked positive value @r0
+;in:	@r0	arg 1 unpacked = x
+;out:	@r0	result unpacked = sin(x)
+;using:	_D	x * (x²)^i
+;	_C	x²
+;	_B	term of Taylor's series
+;	_A	used by mulx
+;	r1	destroyed
+;algo:
+;	sin(x)	= x - x^3/3! + x^5/5! - ... + (-1)^i * x^(2i+1)/(2i+1)! + ...
+;	where 	0 <= x <= Pi/2
+;
+;function sin(x)
+;begin
+;	r <- 0
+;	i <- 0
+;	repeat 5 times:
+;	begin
+;		r <- r + (-1)^i * x^(2i+1)/(2i+1)!
+;		i <- i + 1
+;	end
+;	return r
+;end
+sinx:	push	dpl
+	push	dph
+	mov	r1,#_D
+	call	move_r0_r1		;D <- x
+	mov	a,r0
+	push	acc
+	mov	r0,#_C
+	call	move_r1_r0		;C <- D
+	call	mulx			;C <- x*x
+	
+	
+	pop	acc
+	mov	r0,a
+	
+	mov	b,#4			;# of coefficients
+	mov	dptr,#SIN_+4
+	setb	_Bsign
+	call	polyx
+
+;	mov	a,@r0
+;	add	a,r7			;TODO: #INF
+;	mov	@r0,a
+
+	pop	dph
+	pop	dpl
+	
+	ret
+	
+	
+;-----	arctangent of unpacked positive value @r0
+;in:	@r0	arg 1 unpacked = x
+;out:	@r0	result unpacked = atan(x)
+;using:	_D	argument x ; 
+;	_C	x / ln(2) = x * log_2(e)
+;	_B	term of Taylor's series
+;	_A	used by mulx
+;	r1	destroyed
+;algo:
+;	arctan(x) = x - x^3/3 + x^5/5 - ... + (-1)^i * x^(2i+1)/(2i+1) + ...
+;	where 	0 <= x <= 1
+;
+;function arctan(x)
+;begin
+;	r <- 0
+;	i <- 0
+;	repeat 9 times:
+;	begin
+;		r <- r + (-1)^i * x^(2i+1)/(2i+1) 
+;		i <- i + 1
+;	end
+;	return r
+;end
+;
+;Note that actual coefficients are slightly different from values of 1/(2i+1)
+;for better accuracy.
+atanx:	push	dpl
+	push	dph
+	mov	r1,#_D
+	call	move_r0_r1		;D <- x
+	mov	a,r0
+	push	acc
+	mov	r0,#_C
+	call	move_r1_r0		;C <- D
+	call	mulx			;C <- x*x
+	
+	
+	pop	acc
+	mov	r0,a
+	
+	mov	b,#8			;# of coefficients
+	mov	dptr,#ATAN_+4
+	setb	_Bsign
+	call	polyx
+
+;	mov	a,@r0
+;	add	a,r7			;TODO: #INF
+;	mov	@r0,a
+
+	pop	dph
+	pop	dpl
+	
+	ret
+	
+
+;-----	Polynomial series calculation
+;in:	@r0	initial value of sum
+;	dptr	table of coefficients
+;	b	number of coefficients
+;	_Bsign	1: positive and negative terms - 0: only positive terms
+;out:	@r0	result unpacked = atan(x)
+;using:	_D	argument x0 <- x0*x1 <- x0*x1*x1 <- ...
+;	_C	x1
+;	_B	coefficient
+;	_A	used by mulx
+;	r1	destroyed
+polyx:	push	b
+	mov	a,r0
+	push	acc
+	
+	mov	r0,#_D
+	mov	r1,#_C
+	call	mulx			;D <- D*C = x ^ (2*i + 1)
+	
+	mov	r0,#_B
+	call	move_cdptr_r0		;B <- 1 / (2*i + 1)!
+
+	mov	r1,#_D
+	call	mulx			;B <- B*D = ( x ^ (2*i + 1) ) / (2*i + 1)!
+	
+	pop	acc
+	mov	r0,a
+
+	mov	r1,#_B
+	jnb	_Bsign,polyx2		;jump if positive terms only
+	
+	pop	b
+	push	b
+	jnb	b.0,polyx3
+
+polyx2:	call	addx			;X <- X + B = X + ( x ^ (2*i + 1) ) / (2*i + 1)!
+	sjmp	polyx4
+	
+polyx3:	call	subx			;X <- X - B = X + ( x ^ (2*i + 1) ) / (2*i + 1)!
+
+polyx4:	pop	b
+	djnz	b,polyx			;next i
+	
+	ret
+	
+
+
+;=============================================================================
+;	CONVERSION ROUTINES
+;=============================================================================
+
+
+;-----	convert unpacked value @r0 to scientific (mantissa*10^exponent)
+;in:	@r0	unpacked value to convert
+;	@r1	working register
+;	c	sign of value @r0
+;out	@r0	mantissa (32 bits iiiiffff ffffffff ffffffff ffffffff)
+;	r4	10's exponent
+;	c	sign of value @r0
+;using:	
+eeconv:	
+	push	psw			;save sign
+	mov	r4,#0			;power of 10 (signed)
+	mov	a,@r0
+	jz	eeconv_10
+	add	a,#82h
+	mov	r5,a			;power of 2 (signed)
+	clr	a
+	mov	@r0,a			;extend mantissa
+	mov	r2,#16
+	call	mul_32_8
+	call	move_r1_r0
+eeconv_0:				;loop begin
+	mov	a,r5
+	jz	eeconv_10		;jump if rescaling done
+	jb	acc.7,eeconv_up		;jump if too low
+
+eeconv_down:
+	mov	a,@r0
+	add	a,#low (-50h)
+	jnc	eeconv_down_1
+	mov	r2,#10			;divide by 10
+	call	div_32_4
+	call	move_r1_r0		;move from @r1 to @r0
+	inc	r4			;increment 10's exponent
+eeconv_down_1:
+	call	shl_r0_0		;multiply by 2
+
+	dec	r5			;decrement 2's exponent
+	sjmp	eeconv_0
+
+eeconv_up:
+	call	shr_r0_0		;divide by 2
+
+	inc	r5			;increment 2's exponent
+	mov	a,@r0
+	add	a,#low (-10h)
+	jc	eeconv_up_1
+
+	mov	r2,#10			;multiply by 10
+	call	mul_32_8
+	call	move_r1_r0		;move from @r1 to @r0
+	dec	r4			;decrement 10's exponent
+
+eeconv_up_1:
+	sjmp	eeconv_0
+	
+eeconv_10:
+	pop	psw
+	ret
+
+
+;-----	write decimal representation of scientific value @r0
+;	(need to call eeconv before this routine)
+;in:	@r0		mantissa (28 bits 0000iiii aaaaaaaa bbbbbbbb cccccccc)
+;	@r1		working register
+;	r4		10's exponent
+;	c		sign of value
+;	strfmt		flags for formatting
+;	outstrbuf 	output string buffer
+;	outstrptr	output string buffer pointer
+eeprint:
+	mov	a,#'-'
+	jc	eeprint_sgn		;write minus sign if negative
+	
+	mov	a,strfmt
+	mov	c,acc.6			;write '+' or ' ' if positive
+	mov	a,#' '
+	jnc	eeprint_sgn
+	
+	mov	a,#'+'
+	
+eeprint_sgn:
+	call	wr_acc			;write sign
+	
+	mov	a,#86h			;rounding: add 5E-7 to mantissa
+	inc	r0
+	inc	r0
+	inc	r0
+	clr	c
+	mov	r7,#4
+
+eeprint00:
+	addc	a,@r0
+	mov	@r0,a
+	dec	r0
+	clr	a
+	djnz	r7,eeprint00
+	
+	inc	r0
+	mov	a,@r0
+	clr	c
+	subb	a,#0A0h
+	jc	eeprint00s
+	
+	mov	r2,#10
+	call	div_32_4
+	call	move_r1_r0
+	inc	r4
+	
+eeprint00s:
+	mov	a,strfmt
+	mov	c,acc.4
+	mov	scibit,c		;scientific format flag
+	mov	c,acc.5
+	mov	fixbit,c		;fix format flag
+	
+	mov	a,r4			;get exponent
+	jb	acc.7,eeprint_1		;jump if |x| < 1
+	
+	;|x| > 1
+	clr	c
+	subb	a,#7			;less than 7 digits before decimal point?
+
+eeprint_0:
+	jnc	eeprint_sci		;if not, force scientific format
+	sjmp	eeprint_nsci		;if yes, normal format
+
+eeprint_1:
+	;|x| < 1
+	mov	a,r4
+	clr	c
+	add	a,#4			;less that 4 zeros after decimal point ?
+	sjmp	eeprint_0
+
+eeprint_sci:
+	setb	scibit			;force scientific format
+
+eeprint_nsci:
+	mov	r5,#1
+	jb	scibit,eeprint10	;jump if scientific format
+	
+	mov	a,r4
+	mov	r5,a			;# digits after point
+	inc	r5
+	
+	jnb	acc.7,eeprint10		;jump if |x| < 1
+	
+	dec	r5
+	mov	a,#'0'			;write '0.'
+	call	wr_acc
+	mov	a,#'.'
+	call	wr_acc
+	
+eeprint11:
+	inc	r5
+	mov	a,r5
+	jz	eeprint10
+	
+	mov	a,#'0'			;write non-significative '0's
+	call	wr_acc
+	sjmp	eeprint11
+
+eeprint10:
+
+	mov	r7,#7
+eeprint0:
+	clr	a
+	xch	a,@r0
+	xchd	a,@r0
+	swap	a
+	add	a,#'0'
+	call	wr_acc
+	
+	dec	r5
+	mov	a,r5
+	jnz	eeprint01
+	
+	mov	a,#'.'
+	call	wr_acc
+
+eeprint01:
+	mov	r2,#10
+	call	mul_32_8
+	call	move_r1_r0
+
+	djnz	r7,eeprint0
+	
+	jb	fixbit,eeprint09
+	
+	push	dpl
+	push	dph
+
+	mov	dph,strbufptr
+	mov	dpl,strbufptr+1
+
+eeprint02:
+	mov	a,dpl
+	jnz	eeprint03
+	
+	dec	dph
+
+eeprint03:
+	dec	dpl		
+	
+	movx	a,@dptr
+	clr	c
+	subb	a,#'0'
+	jz	eeprint02
+
+	movx	a,@dptr
+	clr	c
+	subb	a,#'.'
+	jz	eeprint05
+	
+eeprint04:
+	inc	dptr
+	
+eeprint05:
+	clr	a
+	movx	@dptr,a
+
+	mov	strbufptr,dph
+	mov	strbufptr+1,dpl
+
+	pop	dph
+	pop	dpl
+
+eeprint09:
+	jnb	scibit,eeprint_ret
+	
+	;write exponent part	
+	mov	a,#'E'
+	call	wr_acc
+	mov	a,r4
+	mov	c,acc.7
+	mov	a,#'+'
+	jnc	eeprint1
+	
+	mov	a,r4
+	cpl	a
+	inc	a
+	mov	r4,a
+	mov	a,#'-'
+	
+eeprint1:
+	call	wr_acc
+	mov	a,r4
+	mov	b,#10
+	div	ab
+	push	b
+	push	acc
+	mov	r7,#2
+	
+eeprint2:
+	pop	acc
+	add	a,#'0'
+	call	wr_acc
+	djnz	r7,eeprint2
+
+eeprint_ret:
+	ret
+	
+	
+	
+;=============================================================================	
+;	INT arith routines
+;=============================================================================	
+
+
+;-----	add 4 to r0 and r1
+add4_r0_r1:
+	inc	r0
+	inc	r1
+
+;-----	add 3 to r0 and r1
+add3_r0_r1:
+	inc	r0
+	inc	r0
+	inc	r0
+	inc	r1
+	inc	r1
+	inc	r1
+	ret	
+
+;-----	sub 4 from r0 and r1
+sub4_r0_r1:
+	dec	r0
+	dec	r1
+
+;-----	sub 3 from r0 and r1
+sub3_r0_r1:
+	dec	r0
+	dec	r0
+	dec	r0
+	dec	r1
+	dec	r1
+	dec	r1
+	ret	
+
+
+;-----	unsigned integer multiply 32 bits @r0 by 8 bits r2, result 32 bits @r1
+;in:	@r0	multiplicand (32 bits)
+;	r2	multiplicator (8 bits)
+;out:	@r1	product (32 bits)
+;	c set if overflow
+;using:	r3
+mul_32_8:
+	;clear product
+	mov	r3,#3			;@r1 <- 0
+	clr	a
+
+mul_32_8_00:
+	mov	@r1,a
+	inc	r1
+	inc	r0
+	djnz	r3,mul_32_8_00	
+
+	mov	@r1,a
+	
+	;loop 3 times	
+	mov	r3,#3
+
+mul_32_8_0:
+	mov	a,@r0			;@r1 <- @r0 * r2
+	dec	r0
+	mov	b,r2
+	mul	ab
+	add	a,@r1
+	mov	@r1,a
+	dec	r1
+	mov	a,b
+	addc	a,@r1
+	mov	@r1,a
+	djnz	r3,mul_32_8_0
+	
+	mov	a,@r0
+	mov	b,r2
+	mul	ab
+	add	a,@r1
+	mov	@r1,a
+
+	ret
+	
+
+;-----	unsigned integer divide 32 bits @r0 by 4 bits r2, quotient 32 bits @r1, remainder @r0
+;in:	@r0	dividend 32 bits
+;	r2	divisor 4 bits
+;out:	@r1	quotient
+;	@r0	remainder
+div_32_4:
+	mov	r3,#3
+	clr	a
+	mov	@r1,a
+div_32_4_0:
+	mov	a,@r0
+	mov	b,r2
+	div	ab
+	
+	add	a,@r1		;quotient
+	mov	@r1,a
+	mov	a,b
+	mov	@r0,a		;remainder
+	inc	r0
+	mov	a,@r0
+	dec	r0
+	xchd	a,@r0
+	swap	a
+	mov	b,r2
+	div	ab
+	
+	inc	r1
+	swap	a
+	mov	@r1,a
+	clr	a
+	mov	@r0,a
+	xchd	a,@r1
+	dec	r1
+	add	a,@r1
+	mov	@r1,a
+	inc	r1
+	
+	mov	a,b
+	swap	a
+	inc	r0
+	xch	a,@r0
+	xchd	a,@r0
+	
+	djnz	r3,div_32_4_0
+	
+	mov	a,@r0
+	mov	b,r2
+	div	ab
+	add	a,@r1
+	mov	@r1,a
+	mov	a,b
+	mov	@r0,a
+	
+	call	sub3_r0_r1
+	
+	;call	outblk
+	;call	outir1
+	;call	outcrlf
+
+	ret
+	
+	
+;-----	send hex 4 bytes @r0
+;in:	@r0	4 bytes to send
+;using:	r3	looper
+outir0:
+	mov	r3,#4
+outir0_0:
+	mov	a,@r0
+	inc	r0
+	call	outhexacc
+	djnz	r3,outir0_0
+
+
+;-----	decrement r0 4 times
+sub4_r0:
+	dec	r0
+
+
+;-----	decrement r0 3 times
+sub3_r0:
+	dec	r0
+	dec	r0
+	dec	r0
+	ret
+
+
+;-----	send hex 4 bytes @r1
+;in:	@r1	4 bytes to send
+;using:	r3	looper
+outir1:
+	mov	r3,#4
+outir1_0:
+	mov	a,@r1
+	inc	r1
+	call	outhexacc
+	djnz	r3,outir1_0
+
+
+;-----	decrement r1 4 times
+sub4_r1:
+	dec	r1
+
+
+;-----	decrement r0 3 times
+sub3_r1:
+	dec	r1
+	dec	r1
+	dec	r1
+	ret
+
+
+
+;=============================================================================
+;	DATA COPY ROUTINES
+;=============================================================================
+
+
+;-----	copy 4 bytes from @r1 to @r0
+;in:	r1	source location in Data
+;	r0	dest location in Data
+;using:	b	looper
+move_r1_r0:
+	mov	b,#4
+move_r1_r0_0:
+	mov	a,@r1
+	mov	@r0,a
+	inc	r0
+	inc	r1
+	djnz	b,move_r1_r0_0
+	jmp	sub4_r0_r1
+
+
+;-----	copy 4 bytes from @r0 to @r1
+;in:	r0	source location in Data
+;	r1	dest location in Data
+;using:	b	looper
+move_r0_r1:
+	mov	b,#4
+move_r0_r1_0:
+	mov	a,@r0
+	mov	@r1,a
+	inc	r0
+	inc	r1
+	djnz	b,move_r0_r1_0
+	jmp	sub4_r0_r1
+
+
+;-----	copy 4 bytes from packed value in code memory @dptr to unpacked value @r1
+;in:	dptr	source location in Code
+;	r1	dest location in Data
+;out:	@r1	unpacked value
+;	c	sign of unpacked value
+;using:	b	looper
+move_cdptr_r1:
+	mov	b,#4
+move_cdptr_r1_0:
+	clr	a
+	movc	a,@a+dptr
+	mov	@r1,a
+	inc	dptr
+	inc	r1
+	djnz	b,move_cdptr_r1_0
+	call	sub4_r1
+	jmp	unpackx_r1
+	
+
+;-----	copy 4 bytes from packed value in code memory @dptr to unpacked value @r0
+;in:	dptr	source location in Code
+;	r0	dest location in Data
+;out:	@r0	unpacked value
+;	c	sign of unpacked value
+;using:	b	looper
+move_cdptr_r0:
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	call	move_cdptr_r1
+	xch	a,r0
+	xch	a,r1
+	xch	a,r0
+	ret	
+
+
+;-----	copy 4 bytes from xdata memory @dptr to @r0
+;in:	dptr	source location in XData
+;	r0	dest location in Data
+;out:	@r0	value
+;using:	b	looper
+move_xdptr_r0:
+	mov	b,#4
+
+move_b_xdptr_r0:
+	movx	a,@dptr
+	mov	@r0,a
+	inc	r0
+	inc	dptr
+	djnz	b,move_b_xdptr_r0
+	
+	ret
+	
+
+;-----	copy 4 bytes from @r0 to xdata memory @dptr 
+;in:	dptr	source location in XData
+;	r0	dest location in Data
+;out:	@r0	value
+;using:	b	looper
+move_r0_xdptr:
+	mov	b,#4
+
+move_b_r0_xdptr:
+	mov	a,@r0
+	movx	@dptr,a
+	inc	r0
+	inc	dptr
+	djnz	b,move_b_r0_xdptr
+	
+	ret
+	
+
+;-----	shift right 4 bytes at @r0
+;shift right 0
+shr_r0_0:
+	clr	c
+
+;shift right c
+shr_r0_c:
+	mov	r7,#4
+
+shr_r0_c_loop:
+	mov	a,@r0
+	rrc	a
+	mov	@r0,a
+	inc	r0
+	djnz	r7,shr_r0_c_loop
+
+	jmp	sub4_r0
+
+
+;-----	shift right 4 bytes at @r0
+;shift left 0
+shl_r0_0:
+	clr	c
+
+;shift left c
+shl_r0_c:
+	call	add4_r0
+	mov	r7,#4
+
+shl_r0_c_loop:
+	dec	r0
+	mov	a,@r0
+	rlc	a
+	mov	@r0,a
+	djnz	r7,shl_r0_c_loop
+
+	ret
+
+
+;-----	add 4 to r0
+add4_r0:
+	inc	r0
+	inc	r0
+	inc	r0
+	inc	r0
+	ret
+
+
+
+;=============================================================================	
+;	CONSTANTS
+;=============================================================================	
+
+
+INF_	db	127,128,0,0		;+infinite
+PI_	dd	"3.1415926536		;pi
+TWOPI_	dd	"6.2831853072		;2*pi
+HALFPI_	dd	"1.5707963268		;pi/2
+E_	dd	"2.7182818284		;exp(1)
+LOG2E_	dd	"1.4426950409		;log2(e) = ln(e)/ln(2) = 1/ln(2)
+LN2_	dd	"0.6931471806		;ln(2)
+LOG10E_	dd	"0.4342944819		;log(e) = 1/ln(10)
+DOT25_	dd	"0.2500000000		;1/4
+
+
+;-----	Table of inverse factorials 1/n!
+;	used by calculation of exp(x) 
+FCTINV_	equ	$
+ONE_	dd	"1.0000000000		;1
+DOT5_	dd	"0.5000000000		;1/2!
+	dd	"0.1666666666		;1/3!
+	dd	"0.04166666666		;1/4!
+	dd	"0.008333333333		;1/5!
+	dd	"0.0013888888888	;1/6!
+	dd	"0.00019841269841	;1/7!
+	dd	"2.4801587301e-5	;1/8!
+	dd	"2.7557319223e-6	;1/9!
+
+
+;-----	Table of inverse factorials 1/n!
+;	used by calculation of sin(x)
+SIN_	equ	$
+	dd	"1.0000000000		;1
+	dd	"0.1666666666		;1/3!
+	dd	"0.008333333333		;1/5!
+	dd	"0.00019841269841	;1/7!
+	dd	"2.7557319223e-6	;1/9!
+
+
+;-----	Table of coefficients for atan(x) power series
+ATAN_	equ	$
+	dd	"1.000000		;1
+	dd	"0.3333314657		;1/3
+	dd	"0.1999354959		;1/5
+	dd	"0.1420890093		;1/7
+	dd	"0.10656264424		;1/9
+	dd	"0.07528963685		;1/11
+	dd	"0.04290961474		;1/13
+	dd	"0.01616573706		;1/15
+	dd	"0.00286622578		;1/17
+
+
+
+;=============================================================================	
+
+
+	end
+	

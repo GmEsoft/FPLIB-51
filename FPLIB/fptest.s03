@@ -1,0 +1,121 @@
+;
+$fpmacros.inc
+$fplib.inc
+$fpeval.inc
+$inout.inc
+
+	lstxrf
+	locsym+
+
+	rseg	code
+
+	jmp	fptest
+
+fptest:	
+	mov	sp,#80h
+
+	call	inout_init
+	
+	mov	dptr,#fp_version
+	call	outcdptr
+	call	outcrlf
+	
+	mov	dptr,#fp_copyright
+	call	outcdptr
+	call	outcrlf
+	
+	mov	dptr,#0000h
+	mov	a,#40h
+	call	fp_setstobuf
+	
+	mov	dptr,#0100h
+	call	fp_setstrbuf
+	
+	call	fp_run_pc
+	
+	%write	'X='
+	%prompt
+	%readx
+	%sto	0
+	%aclear
+	%write	'X='
+	%writex
+	%write	' atan(X)='
+	%atan
+	%writex
+	%rcl	0
+	%write	' asin(X)='
+	%asin
+	%writex
+	%rcl	0
+	%write	' acos(X)='
+	%acos
+	%writex
+	%write	<13,10>
+	%rcl	0
+	%push
+	%mul
+	%write	' x²='
+	%writex
+	%write	<13,10>
+	%push
+	%enter	1
+	%swap
+	%sub
+	%write	' 1-x²='
+	%writex
+	%write	<13,10>
+	%div
+	%write	' x²/(1-x²)='
+	%writex
+	%write	<13,10>
+	%sqrt
+	%write	' sqrt(x²/(1-x²))='
+	%writex
+	%write	<13,10>
+	%atan
+	%write	' atan(sqrt(x²/(1-x²)))='
+	%writex
+	%write	<13,10>
+	%print
+
+	%rcl	0
+	%pow2
+	%write	'x² ='
+	%writex
+	%write	<13,10>
+	%print
+
+	%rcl	0
+	%log
+	%write	'log(x) ='
+	%writex
+	%write	<13,10>
+	%print
+
+	%ret
+
+loop4:
+	call	outcsp
+	db	'expr:',0
+	mov	dptr,#0100h
+	mov	b,#254
+	call	inxdptreu
+	call	fpeval
+	mov	a,#'='
+	call	outacc
+	mov	dptr,#0100h
+	call	fp_setstrbuf
+	call	writefp
+	mov	dptr,#0100h
+	call	outxdptr
+	call	outcrlf
+	jmp	loop4
+	
+
+endloop:
+	db	0A5h
+	jmp	0
+	
+
+	end	fptest

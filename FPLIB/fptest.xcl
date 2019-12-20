@@ -1,0 +1,8 @@
+FPTEST
+FPLIB
+FPEVAL
+INOUT
+-f 552.xcl 
+-o FPTEST 
+-l FPTEST.map 
+-x

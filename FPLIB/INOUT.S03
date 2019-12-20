@@ -1,0 +1,2025 @@
+;=============================================================================
+; Module        : INOUT.S03
+; Version       : V0.1  07-jun-2010
+; Author        : Michel Bernard - mailto:michel.bernard@advalvas.be
+; Object        : Common Serial Input/Output routines
+; Requires	: 
+; Target        : 8051 family
+; Assembler	: Micro Series 8051 Assembler 2.02/DOS - IAR 1990
+; Copyright (c) 2010 GmE Belgium - All Rights Reserved
+;		: Redistribution and use in source and binary forms, with or 
+;		: without modification, are permitted provided that the 
+;		: following conditions are met:
+;		: 1. Redistributions of source code must retain the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer.
+;		: 2. Redistributions in binary form must reproduce the above 
+;		: copyright notice, this list of conditions and the following 
+;		: disclaimer in the documentation and/or other materials 
+;		: provided with the distribution.
+;		: 3. The name of the author may not be used to endorse or 
+;		: promote products derived from this software without specific 
+;		: prior written permission.
+; Disclaimer	: This software is in its early alpha stage.  It's not meant 
+;		: to be used for production code, and the API might change in 
+;		: the future.  Despite this, it might be useful in some 
+;		: situations and you are encouraged to try it by yourself. 
+;		: Suggestions, bug-reports and even better patches are welcome.
+;		: THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS 
+;		: OR IMPLIED WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR 
+;		: GmE MAKES ANY REPRESENTATION OR WARRANTY OF ANY KIND 
+;		: CONCERNING THE MERCHANTABILITY OF THIS SOFTWARE OR ITS 
+;		: FITNESS FOR ANY PARTICULAR PURPOSE.
+;=============================================================================
+;
+$XMACRO.INC
+$SFR552.INC
+;inaccxmodemtime 	equ     51        	;timout 30"=51 (>=20 for xmodem with procomm)
+inaccxmodemtime 	equ     200        	;timout 2 min (Persoons)
+;inaccxmodemtime 	equ     17       	;timout 10"=17 (min)
+;inaccxmodemtime 	equ     35       	;timout 20" (for sethy and procomm)
+;inaccxmodemtime 	equ     102       	;timout 60" (Jaugeur)
+;
+;OutEndChar          	equ     1       	;Yes Sethy
+OutEndChar          	equ     0       	;No
+;EndChar              	equ     7       	;BEL for sethy
+;EndChar              	equ     3       	;ETX
+BufOvfCtr		equ	10h		;Buffer Overflow counter reload
+;****************************************************************
+;directives for compiler
+;****************************************************************
+        lstxrf
+        locsym+
+
+;****************************************************************
+;       OUTPUT ROUTINES
+;****************************************************************
+
+USE_FLAGS equ	1			;enable flags definition
+USE_LINKS equ	1			;enable user routines linking
+
+if USE_FLAGS
+        public  boutenable, bechocmd
+;================================================================
+        RSEG    data
+;================================================================
+boutenable:
+        ds      1                       ;enable output if not 0
+bechocmd:
+        ds      1                       ;echo input strings
+endif
+
+if USE_LINKS
+	public	uo_vec
+uo_vec:	ds	2			;vector to user output routine
+endif
+;================================================================
+        RSEG    code
+;================================================================
+
+;----- Initialize module statics
+	public	inout_init
+inout_init:
+if USE_FLAGS
+	mov	a,#0FFh
+	mov	boutenable,a
+	mov	bechocmd,a
+endif
+if USE_LINKS
+	clr	a
+	mov	uo_vec,a
+	mov	uo_vec+1,a
+endif
+	ret
+
+;----- Output character in A to V24 line
+;       input:
+;               DPTR == string's address in Code memory
+;	outacc:	check boutenable and user link vector
+;	outaccf: fast version, send only to V24
+        public  outacc, outaccf
+outacc:
+        push    acc
+if USE_LINKS
+	 mov	a,uo_vec
+ 	 orl	a,uo_vec+1
+	 jz	outacc1
+endif
+
+	pop	acc
+	push	acc
+	push	b
+	mov	b,#low  uovec_ret
+	push	b
+	mov	b,#high uovec_ret
+	push	b
+	push	uo_vec+1
+	push	uo_vec
+	ret				;call user routine!
+uovec_ret:
+	pop	b
+
+outacc1:
+
+if USE_FLAGS
+        mov     a,boutenable
+        jz      outacc0
+endif
+        pop     acc
+outaccf:
+	jnb     scon.1,$
+        clr     scon.1
+        mov     sbuf,a
+        ret
+outacc0:
+        pop     acc
+        ret
+
+;----- Output CR+LR sequence
+        public  outcrlf
+outcrlf:
+        push    acc
+        mov     a,#0Dh                  ;CR
+        call    outacc
+        mov     a,#0Ah                  ;LF
+        call    outacc
+        pop     acc
+        ret
+
+;----- Output blank character
+        public  outblk
+outblk:
+        push    acc
+        mov     a,#' '
+        call    outacc
+        pop     acc
+        ret
+
+;----- Output null-terminated string from external memory to V24 line (@DPTR)
+;       input:
+;               DPTR == string's address in Code memory
+;       modify:
+;               A, DPTR
+;       return:
+;               DPTR == address following null-terminator
+        public  outxdptr
+outxdptr:
+        movx    a,@dptr
+        inc     dptr
+        jz      outxdptr_end
+        lcall   outacc
+        sjmp    outxdptr
+outxdptr_end:
+        ret
+
+;----- Output null-terminated string from code memory to V24 line (@DPTR)
+;       input:
+;               DPTR == string's address in Code memory
+;       modify:
+;               A, DPTR
+;       return:
+;               DPTR == address following null-terminator
+        public  outcdptr
+outcdptr:
+        clr     a
+        movc    a,@a+dptr
+        inc     dptr
+        jz      outcdptr_end
+        lcall   outacc
+        sjmp    outcdptr
+outcdptr_end:
+        ret
+
+;----- Output null-terminated string from code memory to V24 line (@SP)
+;       input:
+;               SP == string's address in Code memory
+;       modify:
+;               A
+        public  outcsp
+outcsp:
+        push    ien0
+        clr     ea
+        push    dph
+        push    dpl
+        push    acc
+        dec     sp
+        dec     sp
+        dec     sp
+        dec     sp
+        pop     dph
+        pop     dpl
+        mov     a,#6
+        add     a,sp
+        mov     sp,a
+        lcall   outcdptr
+        mov     a,#-6
+        add     a,sp
+        mov     sp,a
+        push    dpl
+        push    dph
+        inc     sp
+        inc     sp
+        inc     sp
+        inc     sp
+        pop     acc
+        pop     dpl
+        pop     dph
+        pop     ien0
+        ret
+
+
+;----- Output hex value in A to V24 line
+;       input:
+;               A == hex value to display
+;       modify:
+;               A
+        public  outhexacc
+outhexacc:
+        push    acc
+        swap    a
+        lcall   outhexa1
+        pop     acc
+outhexa1:
+        anl     a,#0fh
+        add     a,#-10
+        jnc     outhexa2
+        add     a,#'A'-'9'-1
+outhexa2:
+        add     a,#'0'+10
+        jmp     outacc
+
+
+;----- Output hex value in DPTR to V24 line
+;       input:
+;               HL == hex value to display
+;       modify:
+;               nil
+        public  outhexdptr
+outhexdptr:
+        push    acc
+        mov     a,dph
+        lcall   outhexacc
+        mov     a,dpl
+        lcall   outhexacc
+        pop     acc
+        ret
+
+;----- Output dec value in DPTR to V24 line
+;       input:
+;               HL == dec value to display
+;       modify:
+;               nil
+        public  outdecdptr
+outdecdptr:
+        push    dpl
+        push    dph
+        push    0
+        push    2
+        push    b
+        mov     b,#5
+        mov     r2,#high 10000
+        mov     r0,#low  10000
+outdecdptr1:
+        push    2
+        push    0
+        call    divr20
+        mov     a,dpl
+        add     a,#'0'
+        call    outacc
+        pop     dpl
+        pop     dph
+        push    2
+        push    0
+        mov     r2,#0
+        mov     r0,#10
+        call    divr20
+        mov     r2,dph
+        mov     r0,dpl
+        pop     dpl
+        pop     dph
+        djnz    b,outdecdptr1
+        pop     b
+        pop     2
+        pop     0
+        pop     dph
+        pop     dpl
+        ret
+
+
+
+;----- Output dec value in A to V24 line (2 or 3 digits)
+;       input:
+;               A == dec value to display
+;       modify:
+;               nil
+        public  outdecacc
+outdecacc:
+        push    acc
+        push    b
+        mov     b,#10
+        div     ab
+        push    b
+        mov     b,#10
+        div     ab
+        jz      outdecacc1
+        add     a,#30h
+        call    outacc
+outdecacc1:
+        mov     a,b
+        add     a,#30h
+        call    outacc
+        pop     acc
+        add     a,#30h
+        call    outacc
+        pop     b
+        pop     acc
+        ret
+
+
+
+;----- Output a-th string in table at x-address DPTR to V24 line
+;       input:
+;               dptr == code address of start of strings table
+;               acc == position of the string to output (starting from 0)
+;       modify:
+;               acc, dptr
+;       table consists of a series of zero-terminated strings.
+;       end of table is marked by two zero bytes.
+        public  outcinddptr
+outcinddptr:
+        jnz     outcinddptr0
+        jmp     outcdptr
+outcinddptr0:
+        dec     a
+        push    acc
+outcinddptr1:
+        clr     a
+        movc    a,@a+dptr
+        inc     dptr
+        jnz     outcinddptr1
+        movc    a,@a+dptr
+        jz      outcinddptrx            ;exit if end of table
+        pop     acc
+        sjmp    outcinddptr
+outcinddptrx:
+        pop     acc
+        ret
+
+
+;----- Output packed date in DPTR
+;       input:
+;               DPTR = 16 bits date ((YYYY-1980)*16+MM)*32+DD
+        public  outdatedptr
+outdatedptr:
+        mov     a,dpl                   ;output day
+        anl     a,#00011111b
+        call    outdecacc
+
+        mov     a,#'/'
+        call    outacc
+
+        mov     a,dph
+        rrc     a
+        mov     a,dpl                   ;output month
+        rlc     a
+        rlc     a
+        rlc     a
+        rlc     a
+        anl     a,#00001111b
+        call    outdecacc
+
+        mov     a,#'/'
+        call    outacc
+
+        mov     a,dpl
+        jz      outdatedptr1
+        mov     a,dph                   ;output year
+        rr      a
+        anl     a,#01111111b
+        add     a,#-20
+        jc      outdatedptr1
+        add     a,#100
+outdatedptr1:
+        call    outdecacc
+
+        ret
+
+
+;----- Output packed time HH:MM in DPTR
+;       input:
+;               DPTR = 16 bits time (HH*60+MM)
+        public  outtimehmdptr
+outtimehmdptr:
+        push    2
+        push    0
+        mov     a,dph
+        anl     a,dpl
+        inc     a
+        jnz     outtimehmdptr1
+        inc     dptr
+outtimehmdptr1:
+        mov     r2,#high 60
+        mov     r0,#low  60
+        call    divr20
+        mov     a,dpl
+        call    outdecacc
+        mov     a,#':'
+        call    outacc
+        mov     a,r0
+        call    outdecacc
+        pop     0
+        pop     2
+        ret
+
+
+;****************************************************************
+;       INPUT ROUTINES
+;****************************************************************
+
+if USE_FLAGS
+        public  binacctime
+;================================================================
+        RSEG    data
+;================================================================
+binacctime:
+        ds      1                       ;timeout value (hundredths of min)
+endif
+
+;================================================================
+        RSEG    code
+;================================================================
+
+;-----	Check for character input in A
+	public	chkinacc
+chkinacc:
+	clr	A
+	jnb	RI,chkinacc_ret
+	mov	A,SBUF
+	clr	RI
+	cjne	A,#03H,chkinacc1
+chkinacc0:
+	setb	c
+	ret
+
+chkinacc1:
+	cjne	A,#13H,chkinacc_ret
+
+chkinacc2:
+	call	inacc
+	cjne	A,#03h,chkinacc3
+	sjmp	chkinacc0
+chkinacc3:
+	cjne	A,#11H,chkinacc2
+
+chkinacc_ret:
+	clr	c
+	ret
+
+
+
+;----- Input character in A
+        public  inacc, inaccxmodem
+if USE_FLAGS
+	public	inaccret       
+endif
+
+inaccxmodem:
+
+if USE_FLAGS
+        push    dpl
+        push    dph
+        push    b
+        mov     b,#inaccxmodemtime
+        mov     dptr,#0
+        sjmp    inacc0
+endif
+
+inacc:
+
+if USE_FLAGS
+        push    dpl
+        push    dph
+        push    b
+        mov     b,binacctime
+        mov     dptr,#0
+endif
+
+inacc0:
+
+if USE_FLAGS
+        inc     dptr
+        mov     a,dph
+        orl     a,dpl
+        jnz     inacc1
+        djnz    b,inacc0
+        call    0
+inaccret:
+inacc1:
+endif
+
+        jnb     ri,inacc0
+
+if USE_FLAGS
+        pop     b
+        pop     dph
+        pop     dpl
+endif
+
+        mov     a,sbuf
+        clr     ri
+inacc_end:
+        ret
+
+;----- Input string to address pointed by DPTR without echo (terminated by null)
+;       input:
+;               DPTR == destination address
+;               B    == max string length (terminator excluded)
+;       return:
+;               A    == first char (0 if empty)
+;               B    == string length
+;               C    == exit with CTRL-C or too many buffer overflows
+;               NC   == exit with ENTER
+        public  inxdptr
+inxdptr:
+if OutEndChar
+        mov     a,#EndChar                  ;BEL
+        call    outacc
+endif
+	mov	a,r5
+	push	acc
+        mov     a,r6
+        push    acc
+        mov     a,r7
+        push    acc
+        push    dph
+        push    dpl
+        mov     r7,#0
+        mov     r6,b
+        mov	r5,#BufOvfCtr		;buffer overflow counter
+inxdptr1:
+        lcall   inacc
+        mov     b,a
+        cjne    a,#3,inxdptr11          ;CTRL-C
+        setb    c
+        sjmp    inxdptr_end
+inxdptr11:
+        cjne    a,#0Dh,inxdptr12        ;ENTER
+        sjmp    inxdptr_end
+inxdptr12:
+        cjne    a,#08h,inxdptr2         ;BACKSPACE
+        mov     a,r7
+        jz      inxdptr1
+        %decdptr
+        dec     r7
+        inc     r6
+        sjmp    inxdptr1
+inxdptr2:
+        cjne    a,#1Bh,inxdptr3         ;ESCAPE
+        mov     a,r6
+        add     a,r7
+        mov     r6,a
+        mov     r7,#0
+        pop     dpl
+        pop     dph
+        push    dph
+        push    dpl
+        sjmp    inxdptr1
+inxdptr3:
+        clr     c
+        subb    a,#' '
+        jc      inxdptr1		;jump if nonprintable character
+        mov     a,r6			
+        jnz     inxdptr5		;jump if no buffer overflow
+inxdptr4:        
+	dec	r5
+;	mov	a,#07h			;mrn 22/08/2005 essais Cermetek.
+;	call	outacc
+	mov	a,r5
+	setb	c
+	jz	inxdptr_end		;jump if too many buffer overflows
+        sjmp	inxdptr1
+inxdptr5:      				
+	mov	r5,#BufOvfCtr		;reload overflow counter
+        mov     a,b
+        movx    @dptr,a			;store char in buffer
+        inc     dptr
+        dec     r6
+        inc     r7
+        sjmp    inxdptr1
+inxdptr_end:
+        clr     a
+        movx    @dptr,a			;store null char terminator
+        mov     b,r7
+        pop     dpl
+        pop     dph
+        pop     acc
+        mov     r7,a
+        pop     acc
+        mov     r6,a
+        pop	acc
+        mov	r5,a
+        movx    a,@dptr
+        ret
+
+;----- Input string to address pointed by DPTR with echo (terminated by null)
+;       input:
+;               DPTR == destination address
+;               B    == max string length (terminator excluded)
+;       return:
+;               A    == first char (0 if empty)
+;               B    == string length
+;               C    == exit with CTRL-C
+;               NC   == exit with ENTER
+        public  inxdptre
+inxdptre:
+if OutEndChar
+        mov     a,#EndChar                    ;BEL
+        call    outacc
+endif
+if USE_FLAGS
+        mov     a,bechocmd       
+        jz      inxdptr
+endif
+
+;if USE_LINKS
+;	push	uo_vec
+;	push	uo_vec+1
+;	clr	a
+;	mov	uo_vec,a
+;	mov	uo_vec+1,a
+;endif
+	mov     a,r5
+        push    acc
+        mov     a,r6
+        push    acc
+        mov     a,r7
+        push    acc
+        push    dph
+        push    dpl
+        mov     r7,#0
+        mov     r6,b
+        mov	r5,#BufOvfCtr
+inxdptre1:
+        lcall   inacc
+        mov     b,a
+        cjne    a,#3,inxdptre11         ;CTRL-C
+        setb    c
+        sjmp    inxdptre_end
+inxdptre11:
+        cjne    a,#0Dh,inxdptre12       ;ENTER
+        sjmp    inxdptre_end
+inxdptre12:
+        cjne    a,#08h,inxdptre2        ;BACKSPACE
+        mov     a,r7
+        jz      inxdptre1
+        mov     a,b
+        lcall   outacc
+        mov     a,#' '
+        lcall   outacc
+        mov     a,b
+        lcall   outacc
+        %decdptr
+        dec     r7
+        inc     r6
+        sjmp    inxdptre1
+inxdptre2:
+        cjne    a,#1Bh,inxdptre3        ;ESCAPE
+        mov     a,r6
+        add     a,r7
+        mov     r6,a
+        mov     r7,#0
+        pop     dpl
+        pop     dph
+        push    dph
+        push    dpl
+        mov     a,#'\'
+        lcall   outacc
+        lcall   outcrlf
+        sjmp    inxdptre1
+inxdptre3:
+        clr     c
+        subb    a,#' '
+        jc      inxdptre1
+        mov     a,r6
+        jnz	inxdptre5
+inxdptre4:
+	dec	r5
+	mov	a,#07h
+	call	outacc
+	mov	a,r5
+	setb	c
+	jz	inxdptre_end		;jump if too many buffer overflows
+        sjmp	inxdptre1
+inxdptre5:        
+	mov	r5,#BufOvfCtr		;reload overflow counter
+        mov     a,b
+        movx    @dptr,a
+        lcall   outacc
+        inc     dptr
+        dec     r6
+        inc     r7
+        sjmp    inxdptre1
+inxdptre_end:
+        clr     a
+        movx    @dptr,a
+        lcall   outcrlf
+        mov     b,r7
+        pop     dpl
+        pop     dph
+        pop     acc
+        mov     r7,a
+        pop     acc
+        mov     r6,a
+        pop     acc
+        mov     r5,a
+;if USE_LINKS
+;	pop	uo_vec+1
+;	pop	uo_vec
+;	mov	a,uo_vec+1
+;	orl	a,uo_vec
+;	jz	inxdptre_ret
+;	mov	boutenable,#0
+;	push	dph
+;	push	dpl
+;	call	outxdptr
+;	call	outcrlf
+;	pop	dpl
+;	pop	dph
+;	mov	boutenable,#1
+;inxdptre_ret:
+;endif
+        movx    a,@dptr
+        ret
+
+;----- Input hexadecimal digits from RI
+;       return  A == binary value
+;               C == ctrl-c pressed
+
+        public  inhexacc
+inhexacc:
+if OutEndChar
+        mov     a,#EndChar                    ;BEL
+        call    outaccf
+endif
+        push    0
+        push    1
+        mov     r1,#2
+        clr     a
+inhexacc0:
+        anl     a,#0Fh
+        mov     r0,a
+        call    inacc
+        cjne    a,#03h,inhexacc00
+        setb    c
+        sjmp    inhexacc_end
+inhexacc00:
+        call    outaccf
+        clr     c
+        subb    a,#'0'
+        jc      inhexacc2
+        subb    a,#10
+        jc      inhexacc1
+        subb    a,#7
+        jc      inhexacc2
+        subb    a,#6
+        jnc     inhexacc2
+        add     a,#6
+inhexacc1:
+        add     a,#10
+        swap    a
+        orl     a,r0
+        swap    a
+        mov     r0,a
+        djnz    r1,inhexacc0
+inhexacc2:
+        clr     c
+inhexacc_end:
+        mov     a,r0
+        pop     1
+        pop     0
+        ret
+
+
+
+;----- Read position of string pointed by R2:R0 in table pointed by DPTR
+;       input:
+;               R2:R0 == table origin address (x-memory)
+;               DPTR  == string address
+;       return:
+;               A     == string position in table (0 if not found)
+;               C     == string not found
+;               NC    == string found
+;               DPTR == next byte in the string (unchanged if not found)
+;       uses:
+;               R1
+;       String can be longer than the matched string in the table.
+        public  readcindacc
+readcindacc:
+        clr     a
+        push    dph
+        mov     dph,r2
+        pop     2
+        push    dpl
+        mov     dpl,r0
+        pop     0
+readcindacc0:
+        push    acc
+        clr     a
+        movc    a,@a+dptr
+        jz      readcindaccx0           ;end of table (not found)
+        push    2
+        push    0
+readcindacc1:
+        clr     a
+        movc    a,@a+dptr
+        inc     dptr
+        jz      readcindaccx1           ;found
+        mov     r1,a
+        mov     p2,r2
+        movx    a,@r0
+        call    incr20
+        clr     c
+        subb    a,r1
+        jz      readcindacc1            ;continue while characters match
+readcindacc2:
+        clr     a
+        movc    a,@a+dptr
+        inc     dptr
+        jnz     readcindacc2            ;skip remaining chars of unmatched string
+        pop     0
+        pop     2
+        pop     acc
+        inc     a
+        sjmp    readcindacc0            ;compare with next string
+readcindaccx0:
+        dec     sp
+        setb    c
+        sjmp    readcindaccx            ;unsuccessful return
+readcindaccx1:
+        dec     sp                      ;discard saved dptr
+        dec     sp
+        pop     acc
+        clr     c
+                                        ;successful return
+readcindaccx:
+        mov     dph,r2
+        mov     dpl,r0
+        ret
+
+
+
+
+;----- Input upper-case string to address pointed by DPTR (terminated by null)
+;       input:
+;               DPTR == destination address
+;               B    == max string length (terminator excluded)
+;       return:
+;               A    == first char (0 if empty)
+;               B    == string length
+;               C    == exit with CTRL-C
+;               NC   == exit with ENTER
+        public  inxdptreu
+inxdptreu:
+        call    inxdptre
+        jmp     strtoupper
+
+
+;****************************************************************
+;       STRING ROUTINES
+;****************************************************************
+
+;----- Compare string pointed by DPTR with string pointed by @(SP:SP+1)
+;       input:
+;               dptr == address of string to compare in XDATA memory
+;               @(sp:sp+1) == address of string to match in CODE memory
+;       return:
+;               if match,
+;                       a == 0
+;                       dptr == addr of 1st char following matched string
+;               if no match,
+;                       a != 0
+;                       dptr not modified
+;       modify:
+;               a,b,r0,r1,r2,r3,dptr
+        public  strmatchcsp
+strmatchcsp:
+        mov     r2,dph                  ;pointer to string in XDATA
+        mov     r0,dpl
+        mov     r3,dph                  ;save pointer
+        mov     r1,dpl
+        pop     dph                     ;pointer to CODE
+        pop     dpl
+strmatchcsp0:
+        clr     a
+        movc    a,@a+dptr               ;end of compare?
+        inc     dptr
+        jz      strmatchcsp_end         ;if yes, return OK
+        mov     b,a
+        mov     p2,r2
+        movx    a,@r0
+        cjne    a,b,strmatchcsp_nak
+        mov     a,r0                    ;inc r2:r0
+        add     a,#1
+        mov     r0,a
+        mov     a,r2
+        addc    a,#0
+        mov     r2,a
+        sjmp    strmatchcsp0
+strmatchcsp_nak:
+        clr     a                       ;skip rest of string to match
+        movc    a,@a+dptr
+        inc     dptr
+        jnz     strmatchcsp_nak
+        mov     a,r3
+        mov     r2,a
+        mov     a,r1
+        mov     r0,a
+        mov     a,#0FFh                 ;return FAIL
+strmatchcsp_end:
+        push    dpl                     ;put address following string to match
+        push    dph                     ;  to stack, as return address
+        mov     dph,r2                  ;return value of DPTR
+        mov     dpl,r0
+        ret
+
+
+
+
+;----- Compare character pointed by DPTR in XDATA with character following
+;       the call instruction
+;       return:
+;               A == 0 if characters are same
+;               C == 1 if @DPTR < @(SP:SP+1)
+        public  strmatchchar
+strmatchchar:
+        push    ien0
+        clr     ea
+        push    dpl
+        push    dph
+        dec     sp
+        dec     sp
+        dec     sp
+        pop     dph
+        pop     dpl
+        clr     a
+        movc    a,@a+dptr
+        mov     b,a
+        inc     dptr
+        push    dpl
+        push    dph
+        inc     sp
+        inc     sp
+        inc     sp
+        pop     dph
+        pop     dpl
+        movx    a,@dptr
+        inc     dptr
+        clr     c
+        subb    a,b
+        pop     ien0
+        ret
+
+;----- Compare string pointed by DPTR with string pointed by R2:R0
+;       input:
+;               dptr  == address of 1st string to compare in XDATA memory
+;               r2:r0 == address of 2nd string to compare in XDATA memory
+;       return:
+;               if match,
+;                       a == 0
+;               if no match,
+;                       a != 0
+        public  strmatchxr20
+strmatchxr20:
+        movx    a,@dptr
+        mov     b,a
+        inc     dptr
+        mov     p2,r2
+        movx    a,@r0
+        call    incr20
+        clr     c
+        subb    a,b
+        jnz     strmatchxr20_end
+        mov     a,b
+        jnz     strmatchxr20
+strmatchxr20_end:
+        ret
+
+
+;----- Read hexadecimal digits from string @DPTR in XDATA
+;       return  A == binary value
+
+        public  readhexacc
+readhexacc:
+        push    0
+        push    1
+        mov     r1,#2
+        clr     a
+readhexacc0:
+        anl     a,#0Fh
+        mov     r0,a
+        movx    a,@dptr
+        clr     c
+        subb    a,#'0'
+        jc      readhexacc_end
+        subb    a,#10
+        jc      readhexacc1
+        subb    a,#7
+        jc      readhexacc_end
+        subb    a,#6
+        jnc     readhexacc_end
+        add     a,#6
+readhexacc1:
+        add     a,#10
+        swap    a
+        orl     a,r0
+        swap    a
+        mov     r0,a
+        inc     dptr
+        djnz    r1,readhexacc0
+readhexacc_end:
+        mov     a,r0
+        pop     1
+        pop     0
+        ret
+
+
+;----- Read hexadecimal digits from string @DPTR in XDATA
+;       return  DPTR == binary value
+
+        public  readhexdptr
+readhexdptr:
+        push    0
+        push    2
+        push    b
+        mov     b,#4
+        clr     a
+        mov     r2,a
+        mov     r0,a
+readhexdptr0:
+        movx    a,@dptr
+        clr     c
+        subb    a,#'0'
+        jc      readhexdptr_end
+        subb    a,#10
+        jc      readhexdptr1
+        subb    a,#7
+        jc      readhexdptr_end
+        subb    a,#6
+        jnc     readhexdptr_end
+        add     a,#6
+readhexdptr1:
+        add     a,#10
+        push    acc
+        mov     a,r2
+        anl     a,#00001111b
+        mov     r2,a
+        mov     a,r0
+        anl     a,#11110000b
+        orl     a,r2
+        swap    a
+        mov     r2,a
+        mov     a,r0
+        swap    a
+        anl     a,#11110000b
+        mov     r0,a
+        pop     acc
+        orl     a,r0
+        mov     r0,a
+        inc     dptr
+        djnz    b,readhexdptr0
+readhexdptr_end:
+        mov     dpl,r0
+        mov     dph,r2
+        pop     b
+        pop     2
+        pop     0
+        ret
+
+
+;----- Read signed decimal integer from string @DPTR in XDATA
+;       return  DPTR == binary value
+        public  readsdecdptr
+readsdecdptr:
+        movx    a,@dptr
+        cjne    a,#'-',readdecdptr
+        inc     dptr
+        call    readdecdptr
+        clr     a
+        clr     c
+        subb    a,dpl
+        mov     dpl,a
+        clr     a
+        subb    a,dph
+        mov     dph,a
+        ret
+
+
+
+;----- Read decimal digits from string @DPTR in XDATA
+;       return  DPTR == binary value
+
+        public  readdecdptr
+readdecdptr:
+        push    0
+        push    2
+        push    b
+        mov     b,#5
+        clr     a
+        mov     r2,a
+        mov     r0,a
+readdecdptr0:
+        movx    a,@dptr
+        clr     c
+        subb    a,#'0'
+        jc      readdecdptr_end
+        subb    a,#10
+        jnc     readdecdptr_end
+readdecdptr1:
+        add     a,#10
+        push    dpl
+        push    dph
+        push    acc
+        mov     dph,r2
+        mov     dpl,r0
+        call    adddptr
+        call    adddptr
+        call    addr20
+        call    adddptr
+        pop     acc
+        add     a,dpl
+        mov     r0,a
+        clr     a
+        addc    a,dph
+        mov     r2,a
+        pop     dph
+        pop     dpl
+        inc     dptr
+        djnz    b,readdecdptr0
+readdecdptr_end:
+        mov     dpl,r0
+        mov     dph,r2
+        pop     b
+        pop     2
+        pop     0
+        ret
+
+
+;----- Read decimal digits from string @DPTR in XDATA
+;       return  ACC == binary value
+
+        public  readdecacc
+readdecacc:
+        push    0
+        push    b
+        mov     b,#3
+        clr     a
+        mov     r0,a
+readdecacc0:
+        movx    a,@dptr
+        clr     c
+        subb    a,#'0'
+        jc      readdecacc_end
+        subb    a,#10
+        jnc     readdecacc_end
+readdecacc1:
+        add     a,#10
+        push    acc
+        mov     a,r0
+        add     a,acc
+        add     a,acc
+        add     a,r0
+        add     a,acc
+        mov     r0,a
+        pop     acc
+        add     a,r0
+        mov     r0,a
+        inc     dptr
+        djnz    b,readdecacc0
+readdecacc_end:
+        mov     a,r0
+        pop     b
+        pop     0
+        ret
+
+;----- Read date in 16 bits from string @DPTR in XDATA
+;       return  DPTR = 16 bits date ((YYYY-1980)*16+MM)*32+DD
+        public  readdatedptr
+readdatedptr:
+        push    0
+        push    2
+        push    b
+
+        call    readdecacc              ;read day
+        mov     r0,a
+        mov     r2,#0
+
+        call    strmatchchar
+        db      '/'
+        jnz     readdatedptr_end
+
+        call    readdecacc              ;read month
+        mov     b,#32                   ;month*32
+        mul     ab
+        add     a,r0
+        mov     r0,a
+        clr     a
+        addc    a,b
+        mov     r2,a
+
+        call    strmatchchar
+        db      '/'
+        jnz     readdatedptr_end
+
+        call    readdecacc              ;read year
+        clr     c
+        subb    a,#80                   ;(year-1980)*16*32
+        jnc     readdatedptr_1
+        add     a,#100
+readdatedptr_1:
+        rl      a
+        add     a,r2
+        mov     r2,a
+
+
+readdatedptr_end:
+        mov     dpl,r0
+        mov     dph,r2
+        mov     a,r0
+        jnz     readdatedptr_end1
+        mov     dph,a
+readdatedptr_end1:
+        pop     b
+        pop     2
+        pop     0
+
+        ret
+
+
+;----- Read time (H:M) in 16 bits from string @DPTR in XDATA
+;       return  DPTR = 16 bits time (HH*60+MM)
+        public  readtimehmdptr
+readtimehmdptr:
+        push    0
+        push    2
+        push    b
+
+        call    readdecacc              ;read hour
+        mov     b,#60                   ;hour*60
+        mul     ab
+        mov     r2,b
+        mov     r0,a
+
+        call    strmatchchar
+        db      ':'
+        jnz     readtimehmdptr_end
+
+        call    readdecacc              ;read minutes
+        add     a,r0
+        mov     r0,a
+        clr     a
+        addc    a,r2
+        mov     r2,a
+
+readtimehmdptr_end:
+        mov     dpl,r0
+        mov     dph,r2
+
+        pop     b
+        pop     2
+        pop     0
+
+        ret
+
+
+;----- Convert string to upper case
+        public  strtoupper
+strtoupper:
+        push    dpl
+        push    dph
+        push    psw
+strtoupper0:
+        movx    a,@dptr
+        jz      strtoupper_end
+        cjne    a,#'a',$+3
+        jc      strtoupper1
+        cjne    a,#'z'+1,$+3
+        jnc     strtoupper1
+        add     a,#'A'-'a'
+        movx    @dptr,a
+strtoupper1:
+        inc     dptr
+        sjmp    strtoupper0
+strtoupper_end:
+        pop     psw
+        pop     dph
+        pop     dpl
+        ret
+
+
+;----- Skip blanks
+        public  strskipblk
+strskipblk0:
+        inc     dptr
+strskipblk:
+        movx    a,@dptr
+        add     a,#-' '
+        jz      strskipblk0
+        ret
+
+;----- Skip to blank or NUL
+        public  strskip
+strskip0:
+        inc     dptr
+strskip:
+        movx    a,@dptr
+        jz      strskip_end
+        add     a,#-' '
+        jnz     strskip0
+strskip_end:
+        ret
+
+;----- Skip hex number
+        public  strskiphex
+strskiphex0:
+        inc     dptr
+strskiphex:
+        movx    a,@dptr
+        clr     c
+        subb    a,#'0'
+        jc      strskiphex_end
+        subb    a,#10
+        jc      strskiphex0
+        subb    a,#7
+        jc      strskiphex_end
+        subb    a,#6
+        jc      strskiphex0
+strskiphex_end:
+        ret
+
+;----- Copy memory from CODE (DPTR to R3:R1) to XDATA (R2:R0)
+        public  memcpyc
+memcpyc:
+        clr     a
+        movc    a,@a+dptr
+        mov     p2,r2
+        movx    @r0,a
+        inc     dptr
+        call    incr20
+        call    cmpr31
+        jnz     memcpyc
+        ret
+
+;----- Copy memory from XDATA (DPTR to R3:R1) to XDATA (R2:R0)
+        public  memcpy
+memcpy:
+        movx    a,@dptr
+        mov     p2,r2
+        movx    @r0,a
+        inc     dptr
+        call    incr20
+        call    cmpr31
+        jnz     memcpy
+        ret
+
+;----- Copy string from XDATA (DPTR) to XDATA (R2:R0)
+        public strcpy
+strcpy:
+        movx    a,@dptr
+        mov     p2,r2
+        movx    @r0,a
+        inc     dptr
+        jz      strcpy_end
+        call    incr20
+        sjmp    strcpy
+strcpy_end:
+        ret
+
+
+;----- Copy string from CODE (DPTR) to XDATA (R2:R0)
+        public strcpyc
+strcpyc:
+        clr     a
+        movc    a,@a+dptr
+        mov     p2,r2
+        movx    @r0,a
+        inc     dptr
+        jz      strcpyc_end
+        call    incr20
+        sjmp    strcpyc
+strcpyc_end:
+        ret
+
+
+;----- Test if x-memory character pointed by DPTR is a digit
+;       return: ACC == 0 if character is a digit
+        public  isdigitxdptr
+isdigitxdptr:
+        movx    a,@dptr
+        cjne    a,#'0',$+3
+        jc      isdigitxdptr1
+        cjne    a,#'9'+1,$+3
+        jnc     isdigitxdptr1
+isdigitxdptr0:
+        clr     a
+isdigitxdptr1:
+        ret
+
+
+
+
+;----- Write dec value in A as string in memory @R2:R0 (2 or 3 digits)
+;       input:
+;               A == dec value to display
+;               R2:R0 == dest. address
+;       modify:
+;               nil
+        public  writedecacc
+writedecacc:
+        push    acc
+        push    b
+        mov     b,#10
+        div     ab
+        push    b
+        mov     b,#10
+        div     ab
+        jz      writedecacc1
+        add     a,#30h
+        mov     p2,r2
+        movx    @r0,a
+        call    incr20
+writedecacc1:
+        mov     a,b
+        add     a,#30h
+        mov     p2,r2
+        movx    @r0,a
+        call    incr20
+        pop     acc
+        add     a,#30h
+        mov     p2,r2
+        movx    @r0,a
+        call    incr20
+        clr     a
+        mov     p2,r2
+        movx    @r0,a
+        pop     b
+        pop     acc
+        ret
+
+;----- 16-bit routines (DPTR as 16-bit acc, r2:r0, r3:r1, b:a)
+        public  incr20
+incr20:
+        push    acc
+        mov     a,#1
+        add     a,r0
+        mov     r0,a
+        clr     a
+        addc    a,r2
+        mov     r2,a
+        pop     acc
+        ret
+
+        public  incr31
+incr31:
+        push    acc
+        mov     a,#1
+        add     a,r1
+        mov     r1,a
+        clr     a
+        addc    a,r3
+        mov     r3,a
+        pop     acc
+        ret
+
+        public  cmpr20
+cmpr20:
+        clr     c
+        mov     a,dph
+        subb    a,r2
+        jnz     cmpr20x
+        mov     a,dpl
+        subb    a,r0
+cmpr20x:
+        ret
+
+        public  cmpba                   ; false !!
+cmpba:
+        clr     c
+        mov     a,dph
+        subb    a,r2
+        jnz     cmpbax
+        mov     a,dpl
+        subb    a,r0
+cmpbax:
+        ret
+
+        public  cmpr31
+cmpr31:
+        clr     c
+        mov     a,dph
+        subb    a,r3
+        jnz     cmpr31x
+        mov     a,dpl
+        subb    a,r1
+cmpr31x:
+        ret
+
+        public  cmpr20r31
+cmpr20r31:
+        clr     c
+        mov     a,r2
+        subb    a,r3
+        jnz     cmpr20r31x
+        mov     a,r0
+        subb    a,r1
+cmpr20r31x:
+        ret
+
+        public  addba
+addba:
+        add     a,dpl
+        mov     dpl,a
+        mov     a,dph
+        addc    a,b
+        mov     dph,a
+        ret
+
+        public  addr20
+addr20:
+        mov     a,dpl
+        add     a,r0
+        mov     dpl,a
+        mov     a,dph
+        addc    a,r2
+        mov     dph,a
+        ret
+
+        public  addr31
+addr31:
+        mov     a,dpl
+        add     a,r1
+        mov     dpl,a
+        mov     a,dph
+        addc    a,r3
+        mov     dph,a
+        ret
+
+        public  adddptr
+adddptr:
+        mov     a,dpl
+        add     a,dpl
+        mov     dpl,a
+        mov     a,dph
+        addc    a,dph
+        mov     dph,a
+        ret
+
+        public  subbr20
+subbr20:
+        mov     a,dpl
+        subb    a,r0
+        mov     dpl,a
+        mov     a,dph
+        subb    a,r2
+        mov     dph,a
+        ret
+
+        public  incxdptr16
+incxdptr16:
+        push    acc
+        push    dph
+        inc     dptr
+        movx    a,@dptr
+        add     a,#1
+        movx    @dptr,a
+        pop     dph
+        dec     dpl
+        movx    a,@dptr
+        addc    a,#0
+        movx    @dptr,a
+        pop     acc
+        ret
+
+        public  divb
+divb:
+        push    0
+        push    2
+        mov     r2,#0
+        mov     r0,b
+        call    divr20
+        mov     b,r0
+        pop     2
+        pop     0
+        ret
+
+
+;----- Div 16 Bits : dptr, r2:r0 = dptr / r2:r0
+
+        public  divr20
+divr20:
+        mov     a,r7
+        push    acc
+        mov     a,r6
+        push    acc
+        mov     a,r5
+        push    acc
+        mov     a,r4
+        push    acc
+        push    b
+
+        clr     a
+        mov     r4,a                    ;(54) <- 0 (dividend: (54:HL))
+        mov     r5,a
+        mov     r6,a                    ;(76) <- 0 (quotient: (76))
+        mov     r7,a
+
+        mov     b,#16
+
+divr201:
+        mov     a,r6                    ;shift quotient left 1 bit
+        add     a,acc                   ;       (76)
+        mov     r6,a
+        mov     a,r7
+        addc    a,acc
+        mov     r7,a
+
+        mov     a,dpl                   ;shift dividend left 1 bit
+        add     a,acc                   ;      (54.HL)
+        mov     dpl,a
+        mov     a,dph
+        addc    a,acc
+        mov     dph,a
+        mov     a,r4
+        addc    a,acc
+        mov     r4,a
+        mov     a,r5
+        addc    a,acc
+        mov     r5,a
+        jc      divr203                 ;if dropped bit is 1, do subtract
+
+        clr     c                       ;compare dividend and divisor
+        mov     a,r4                    ;        (54)         (20)
+        subb    a,r0
+        mov     a,r5
+        subb    a,r2
+
+        jc      divr202                 ;if dividend<divisor, skip subtract
+
+divr203:
+        mov     a,r6                    ;quotient <- quotient + 1
+        add     a,#1                    ;(76)
+        mov     r6,a
+        mov     a,r7
+        addc    a,#0
+        mov     r7,a
+
+        clr     c                       ;dividend <- dividend - divisor
+        mov     a,r4                    ;(54)                   (20)
+        subb    a,r0
+        mov     r4,a
+        mov     a,r5
+        subb    a,r2
+        mov     r5,a
+
+divr202:
+        djnz    b,divr201
+
+        mov     a,r4
+        mov     r0,a                    ;rest (20) <- dividend (54)
+        mov     a,r5
+        mov     r2,a
+        mov     a,r6
+        mov     dpl,a                   ;quotient (HL) <- (76)
+        mov     a,r7
+        mov     dph,a
+
+        pop     b
+        pop     acc
+        mov     r4,a
+        pop     acc
+        mov     r5,a
+        pop     acc
+        mov     r6,a
+        pop     acc
+        mov     r7,a
+
+        ret
+
+
+;----- Div 32 Bits by 16: dptr:r3:r1, r2:r0 = dptr:r3:r1 / r2:r0
+
+        public  div32s
+div32s:
+        push    4
+        push    5
+        push    6
+        push    7
+        push    8
+        push    9
+        push    b
+
+        clr     a
+        mov     r4,a                    ;(54) <- 0   (dividend: (54.HL31))
+        mov     r5,a
+        mov     r6,a                    ;(9876) <- 0 (quotient: (9876))
+        mov     r7,a
+        mov     8,a
+        mov     9,a
+
+        mov     b,#32
+
+div32s1:
+        mov     a,r6                    ;shift quotient left 1 bit
+        add     a,acc                   ;      (9876)
+        mov     r6,a
+        mov     a,r7
+        addc    a,acc
+        mov     r7,a
+        mov     a,8
+        addc    a,acc
+        mov     8,a
+        mov     a,9
+        addc    a,acc
+        mov     9,a
+
+        mov     a,r1                    ;shift dividend left 1 bit
+        add     a,acc                   ;      (54.HL31)
+        mov     r1,a
+        mov     a,r3
+        addc    a,acc
+        mov     r3,a
+        mov     a,dpl
+        addc    a,acc
+        mov     dpl,a
+        mov     a,dph
+        addc    a,acc
+        mov     dph,a
+        mov     a,r4
+        addc    a,acc
+        mov     r4,a
+        mov     a,r5
+        addc    a,acc
+        mov     r5,a
+
+        jc      div32s3                 ;if dropped bit is 1, do subtract
+
+        clr     c                       ;compare dividend and divisor
+        mov     a,r4                    ;        (54)         (20)
+        subb    a,r0
+        mov     a,r5
+        subb    a,r2
+
+        jc      div32s2                 ;if dividend<divisor, skip subtract
+
+div32s3:
+        mov     a,r6                    ;quotient <- quotient + 1
+        add     a,#1                    ;(9876)
+        mov     r6,a
+        mov     a,r7
+        addc    a,#0
+        mov     r7,a
+        mov     a,8
+        addc    a,#0
+        mov     8,a
+        mov     a,9
+        addc    a,#0
+        mov     9,a
+
+        clr     c                       ;dividend <- dividend - divisor
+        mov     a,r4                    ;(54)                   (20)
+        subb    a,r0
+        mov     r4,a
+        mov     a,r5
+        subb    a,r2
+        mov     r5,a
+
+div32s2:
+        djnz    b,div32s1
+
+        mov     r0,4                    ;rest (20) <- dividend (54)
+        mov     r2,5
+
+        mov     r1,6                    ;quotient (HL31) <- (9876)
+        mov     r3,7
+        mov     dpl,8
+        mov     dph,9
+
+        pop     b
+        pop     9
+        pop     8
+        pop     7
+        pop     6
+        pop     5
+        pop     4
+
+        ret
+
+
+;----- Check XMODEM transmission
+;       output:
+;               a = 0 if ACK
+;               c = 1 if aborted
+        public  xxcheck
+xxcheck:
+;        jnb     ri,xxcheck
+;        clr     ri
+;        mov     a,sbuf
+        call    inaccxmodem
+        cjne    a,#18h,xxcheck1         ;CAN
+        setb    c                       ;c=1, a!=0
+        sjmp    xxcheck_end
+xxcheck1:
+        cjne    a,#06h,xxcheck2         ;ACK
+        clr     a                       ;c=0, a=0
+        sjmp    xxcheck_end
+xxcheck2:
+        cjne    a,#15h,xxcheck3         ;NAK
+                                        ;c=0, a!=0
+        sjmp    xxcheck_end
+xxcheck3:
+        ;;;sjmp    xxcheck
+        cjne    a,#43h,xxcheck          ;'C' mrn 14 feb. for MDL Psion 5
+;                                       ;c=0, a!=0
+        clr     a                       ;c=0, a=0
+xxcheck_end:
+        ret
+
+;----- Start XMODEM transmission
+;       output:
+;               c = 1 if aborted
+;               b = Block # (=0)
+        public  xxstart
+xxstart:
+        mov     b,#0
+        sjmp    xxcheck
+
+
+;----- Send XMODEM 128-byte block
+;       input:
+;               dptr = block address
+;               b = last block #
+;       output:
+;               c = 1 if aborted
+;               b = Block # (=0)
+        public  xxblock
+xxblock:
+        push    dph
+        push    dpl
+        push    0
+        push    1
+        clr     a
+        mov     r0,a                    ;r0 = checksum
+        mov     r1,a                    ;r1 = byte counter
+        mov     a,#1
+        call    outacc                  ;send #1 (SOH)
+        inc     b
+        mov     a,b
+        call    outacc                  ;send block#
+        cpl     a
+        call    outacc                  ;send ~block#
+xxblock1:
+        movx    a,@dptr
+        inc     dptr
+        call    outacc                  ;send single data byte
+        add     a,r0
+        mov     r0,a
+        inc     r1
+        mov     a,r1
+        jnb     acc.7,xxblock1          ;loop until 128 bytes sent
+        mov     a,r0
+        call    outacc                  ;send checksum
+        pop     1
+        pop     0
+        call    xxcheck                 ;wait acknowledgement
+        jc      xxblock_end2            ;if canceled
+        jz      xxblock_end2            ;if ACK
+        pop     dpl
+        pop     dph
+        dec     b
+        sjmp    xxblock
+xxblock_end2:
+        dec     sp
+        dec     sp
+        ret
+
+;----- Send XMODEM-crc 128-byte or 1024-byte block
+;       input:
+;               dptr = block address
+;               b = last block #
+;		a = block type (0: checksum ; 1: crc,128 bytes ; 8: crc,1024 bytes)
+;       output:
+;		dptr = next block address
+;               c = 1 if aborted
+;               b = Block #
+        public  xxcrcblock
+xxcrcblock:
+	jz	xxblock			;jump to checksum version if a == 0
+        push    dph
+        push    dpl
+        push    0			;crc-lo
+        push	2			;crc-hi
+        push    1			;byte counter
+        push	acc			;block counter
+	cjne	a,#8,xxcrcblock0	;if 1k block, change <soh> to <stx>
+        mov     a,#2			;<stx>
+xxcrcblock0:
+        call    outacc                  ;send <soh> or <stx>
+        inc     b
+        mov     a,b
+        call    outacc                  ;send block#
+        cpl     a
+        call    outacc                  ;send ~block#
+        clr     a
+        mov     r0,a                    ;r2:r0 = crc16
+        mov	r2,a			;
+        pop	acc
+xxcrcblock1:
+	push	acc
+	clr	a
+        mov     r1,a                    ;r1 = byte counter
+xxcrcblock2:
+        movx    a,@dptr
+        inc     dptr
+        call    outacc                  ;send single data byte
+	call	crc16			;compute CRC to r2:r0
+        inc     r1
+        mov     a,r1
+        jnb     acc.7,xxcrcblock2       ;loop until 128 bytes sent
+        pop	acc
+        dec	a
+        jnz	xxcrcblock1
+        mov     a,r2
+        call    outacc                  ;send CRC high byte
+        mov     a,r0
+        call    outacc                  ;send CRC low byte
+        pop     1
+        pop	2
+        pop     0
+        call    xxcheck                 ;wait acknowledgement
+        jc      xxcrcblock_end2         ;if canceled
+        jz      xxcrcblock_end2         ;if ACK
+        pop     dpl			;restore dptr and retry
+        pop     dph
+        dec     b
+        sjmp    xxcrcblock
+xxcrcblock_end2:
+        dec     sp			;don't restore dptr and return
+        dec     sp
+        ret
+
+;----- End XMODEM transmission
+;       output:
+;               c = 1 if aborted
+        public  xxend
+xxend:
+        mov     a,#4                    ;EOT
+        call    outacc
+        call    xxcheck
+        jc      xxend_end
+        jnz     xxend
+xxend_end:
+        ret
+
+
+
+;----- Calc 16-bit CRC (CCITT polynom b16:b10:b5:b0)
+;       input:
+;               a = data byte
+;               R2:R0 = CRC
+;       output:
+;               R2:R0 = CRC (updated)
+;	affected:
+;		psw
+	public	crc16			; void crc16( byte a, word r2:r0 ) {
+crc16:
+	push	acc
+	push	b
+	xrl	a,r2			;    r2:r0 ^= ( a << 8 );
+	mov	r2,a
+	mov	b,#8			;    for ( b=8; b>0; --b ) {
+crc161:
+	clr	c			;    	c:r2:r0 <<= 1;
+	mov	a,r0
+	rlc	a			;    	// c <- a <- 0 
+	mov	r0,a
+	mov	a,r2
+	rlc	a			;    	// c <- a <- c
+	mov	r2,a
+	
+	jnc	crc162			;	if ( c ) {
+
+	mov	a,r0			;    	   r2:r0 ^= 0x1021;
+	xrl	a,#low  1021h
+	mov	r0,a
+	mov	a,r2
+	xrl	a,#high 1021h
+	mov	r2,a			;       }
+
+crc162:	djnz	b,crc161		;    }
+	pop	b
+	pop	acc
+
+	ret				; }
+
+	
+;****************************************************************
+        end
