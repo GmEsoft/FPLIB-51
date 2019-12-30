@@ -124,7 +124,7 @@ DPTR.
 
 The result of the expression is stored in internal DATA memory at the location pointed by R0.
 
-The syntax is:
+The syntax is (`expr` being the expression to evaluate):
 ```
 expr   := sum
 
@@ -147,7 +147,7 @@ value   := ( expr )
         |  number
 
 number  := -expr
-        |  [[0-9...].]0-9...
+        |  [[0-9...].]0-9...[E[-]0-9...]
 
 func_id := SQRT | SQR | LOG | LN | EXP | SIN | COS | TAN | ASIN | ACOS | ATAN | INT | FRAC
 ```
