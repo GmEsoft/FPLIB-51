@@ -2297,7 +2297,7 @@ atanfp1:
 ;	_C	by sqrtx
 ;	_D	by sqrtx
 ;algo:
-;	arcsin(x) = arctan( x / sqrt( 1 - x� ) )
+;	arcsin(x) = arctan( x / sqrt( 1 - x^2 ) )
 ;		  = +/- PI/2  if  x = +/- 1
 	public	asinfp
 asinfp:	call	unpackfp_r0		;
@@ -3315,8 +3315,8 @@ expx1:	mov	r7,a			;save integer part of C
 ;-----	sine of unpacked positive value @r0
 ;in:	@r0	arg 1 unpacked = x
 ;out:	@r0	result unpacked = sin(x)
-;using:	_D	x * (x�)^i
-;	_C	x�
+;using:	_D	x * (x^2)^i
+;	_C	x^2
 ;	_B	term of Taylor's series
 ;	_A	used by mulx
 ;	r1	destroyed
