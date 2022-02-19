@@ -105,12 +105,12 @@ The following public routines are implemented:
     - `tanfp`: @r0 := sin( @r0 ) / cos( @r0 )
     - `atanfp`: @r0 := arctan( @r0 ) [Taylor expansion]
     - `asinfp`: @r0 := arctan( @r0 / sqrt( 1 - @r0 * @r0 ) )
-    - `acosfp`: @r0 := Pi / 1 - arcsin( @r0 )
+    - `acosfp`: @r0 := Pi / 2 - arcsin( @r0 )
     - `powfp`: @r0 := pow( @r0, @r1 ) = exp( @r0 * ln( @r1 ) )
     - `pifp`: @r0 := Pi
     - `efp`: @r0 := E = exp( 1 )
     - `writefp`: write @r0 to string buffer
-    - `readfp`: parse and read @rO from string buffer
+    - `readfp`: parse and read @r0 from string buffer
 - Routines using X-Y-Z-T stack and the FP Executive (see below):
     - `fp_run_pc`: execute FP Executive code from CODE memory at current PC
     - `fp_run_xdptr`: execute FP Executive code from DATA memory at dptr
@@ -141,13 +141,13 @@ pow     := func
 
 func    := value
         |  PI
-        |  func_id value
+        |  func_id func
 
 value   := ( expr )
+        |  -number
         |  number
 
-number  := -expr
-        |  [[0-9...].]0-9...[E[-]0-9...]
+number  := [[0-9...].]0-9...[E[-]0-9...]
 
 func_id := SQRT | SQR | LOG | LN | EXP | SIN | COS | TAN | ASIN | ACOS | ATAN | INT | FRAC
 ```
